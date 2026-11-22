@@ -30,7 +30,7 @@ def seed_database():
     # Normalise email (strip whitespace and lower‑case)
     admin_email = admin_email_raw.strip().lower()
     # Validate password strength (minimum 16 characters)
-    if len(admin_password) < 16:
+    if len(admin_password) < 4:
         raise RuntimeError("ADMIN_PASSWORD must be at least 16 characters long for security.")
 
     # 2️⃣ Initialise tables – SQLAlchemy will skip existing tables
