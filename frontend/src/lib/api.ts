@@ -3,10 +3,8 @@ export function getApiBaseUrl(): string {
   if (process.env.NEXT_PUBLIC_API_URL) {
     return process.env.NEXT_PUBLIC_API_URL;
   }
-  if (typeof window !== "undefined" && window.location?.hostname) {
-    return `http://${window.location.hostname}:8001`;
-  }
-  return "http://127.0.0.1:8001";
+  // Production default URL
+  return 'https://smartcarefinal.onrender.com';
 }
 
 export interface UserSession {
