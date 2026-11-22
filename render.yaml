@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: smartcare-backend
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: backend/Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false   # set in Render UI (PostgreSQL connection string)
+      - key: SECRET_KEY
+        sync: false   # generate a strong random secret in Render UI
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"

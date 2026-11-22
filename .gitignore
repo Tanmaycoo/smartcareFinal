@@ -1,0 +1,39 @@
+
+# Node.js
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Flutter generated files
+.dart_tool/
+**/.dart_tool/
+build/
+**/build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+coverage/
+
+# Android generated files
+**/.gradle/
+**/local.properties
+
+# iOS generated files
+**/Pods/
+**/.symlinks/
+
+# Flutter generated configuration
+**/Flutter/Generated.xcconfig
+**/Flutter/flutter_export_environment.sh
+
+# IDE and operating system
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
