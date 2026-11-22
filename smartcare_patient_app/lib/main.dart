@@ -18,7 +18,7 @@ import 'providers/pricing_provider.dart';
 import 'providers/billing_provider.dart';
 import 'providers/blood_provider.dart';
 import 'providers/referral_provider.dart';
-import 'ui/screens/main_shell.dart';
+import 'ui/screens/splash/splash_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -61,7 +61,7 @@ void main() async {
           create: (_) => HospitalProvider(hospitalRepository, storageService),
         ),
         ChangeNotifierProvider<RequestProvider>(
-          create: (_) => RequestProvider(requestRepository),
+          create: (_) => RequestProvider(requestRepository, storageService),
         ),
         ChangeNotifierProvider<PricingProvider>(
           create: (_) => PricingProvider(pricingRepository),
@@ -90,7 +90,7 @@ class SmartCarePatientApp extends StatelessWidget {
       title: 'SmartCare Patient',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      home: const MainShell(),
+      home: const SplashScreen(),
     );
   }
 }

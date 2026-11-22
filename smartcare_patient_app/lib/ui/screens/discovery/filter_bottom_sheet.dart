@@ -73,7 +73,7 @@ class _FilterBottomSheetState extends State<FilterBottomSheet> {
               TextButton(
                 onPressed: () {
                   setState(() {
-                    _tempRadius = 10.0;
+                    _tempRadius = null;
                     _tempCategory = 'All';
                   });
                 },

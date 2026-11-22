@@ -14,6 +14,7 @@ import {
   Clock,
   AlertCircle,
   CheckCircle2,
+  XCircle,
   PhoneCall,
   Edit,
   Save,
@@ -65,6 +66,7 @@ import {
   createTransfer,
   updateTransferStatus,
   getHospitals,
+  subscribeToDataChanges,
   BedCategory,
   ResourceInventory,
   PatientRequest,
@@ -73,10 +75,37 @@ import {
   UserSession
 } from "@/lib/api";
 
+const ALL_BED_PRESETS = [
+  { group: "Critical Care", label: "ICU (Intensive Care Unit) Bed", price: 5000 },
+  { group: "Critical Care", label: "HDU (High Dependency Unit) Bed", price: 3500 },
+  { group: "Critical Care", label: "PICU (Pediatric Intensive Care) Bed", price: 4500 },
+  { group: "Critical Care", label: "NICU (Neonatal Intensive Care) Bed", price: 5000 },
+  { group: "Critical Care", label: "CCU / ICCU (Coronary Care) Bed", price: 5500 },
+  { group: "Critical Care", label: "Ventilator Supported Critical Bed", price: 6000 },
+  { group: "General Wards", label: "General Ward Bed (Male)", price: 1000 },
+  { group: "General Wards", label: "General Ward Bed (Female)", price: 1000 },
+  { group: "General Wards", label: "General Ward Bed (Common / Mixed)", price: 1000 },
+  { group: "General Wards", label: "Semi-Private Room (Twin Sharing) Bed", price: 2200 },
+  { group: "General Wards", label: "Private Single Deluxe Room Bed", price: 3800 },
+  { group: "General Wards", label: "Super Deluxe / Suite Ward Bed", price: 6500 },
+  { group: "Emergency & Specialty", label: "Emergency / Trauma Bay Bed", price: 1500 },
+  { group: "Emergency & Specialty", label: "Oxygen Supported Ward Bed", price: 1800 },
+  { group: "Emergency & Specialty", label: "Isolation Ward Bed (Infectious Diseases)", price: 2800 },
+  { group: "Emergency & Specialty", label: "Post-Operative Recovery Bed (PACU)", price: 2500 },
+  { group: "Emergency & Specialty", label: "Dialysis Unit Bed / Station", price: 2000 },
+  { group: "Emergency & Specialty", label: "Maternity & Labour Delivery Bed (LDR)", price: 3000 },
+  { group: "Emergency & Specialty", label: "Day Care / Chemotherapy Bed", price: 1800 },
+  { group: "Emergency & Specialty", label: "Burns Unit Specialized Bed", price: 4000 },
+  { group: "Emergency & Specialty", label: "Pediatric General Ward Bed", price: 1500 },
+];
+
 export default function HospitalDashboardPage() {
   const router = useRouter();
   const [session, setSession] = useState<UserSession | null>(null);
   const [activeTab, setActiveTab] = useState<"dashboard" | "beds" | "resources" | "requests" | "transfers" | "pricing" | "billing" | "blood" | "referrals" | "profile">("dashboard");
+  // Admitted patients for billing
+  const [admittedPatients, setAdmittedPatients] = useState<any[]>([]);
+  const [loadingPatients, setLoadingPatients] = useState(false);
 
   // Data states
   const [beds, setBeds] = useState<BedCategory[]>([]);
@@ -87,8 +116,8 @@ export default function HospitalDashboardPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Filter in transfer table
-  const [queueFilter, setQueueFilter] = useState<"ALL" | "CRITICAL">("ALL");
+  // Filter in transfer/request queue
+  const [queueFilter, setQueueFilter] = useState<"ALL" | "CRITICAL" | "ACTIVE" | "COMPLETED" | "DIVERTED">("ALL");
 
   // New Transfer Modal State
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -133,10 +162,25 @@ export default function HospitalDashboardPage() {
     }
     setSession(s);
     loadAllData(s.hospital_id || undefined);
+
+    // Instant real-time cross-tab sync when requests, beds, or pricing mutate
+    const unsubscribe = subscribeToDataChanges(() => {
+      loadAllData(s.hospital_id || undefined, true);
+    });
+
+    // Background live telemetry polling every 4 seconds for emergency complaints & bed telemetry
+    const interval = setInterval(() => {
+      loadAllData(s.hospital_id || undefined, true);
+    }, 4000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
   }, []);
 
-  const loadAllData = async (hospId?: number) => {
-    setLoading(true);
+  const loadAllData = async (hospId?: number, silent: boolean = false) => {
+    if (!silent) setLoading(true);
     try {
       const [bedsData, resData, reqData, trfData, hospData] = await Promise.all([
         getHospitalBeds(hospId),
@@ -153,14 +197,14 @@ export default function HospitalDashboardPage() {
     } catch (err) {
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
       setRefreshing(false);
     }
   };
 
   const handleRefresh = () => {
     setRefreshing(true);
-    loadAllData(session?.hospital_id || undefined);
+    loadAllData(session?.hospital_id || undefined, false);
   };
 
   const handleLogout = () => {
@@ -240,29 +284,232 @@ export default function HospitalDashboardPage() {
     }
   };
 
+  // Open Triage Modal with preselection matching real bed inventory
+  const openTriageModal = (req: PatientRequest) => {
+    setTriageRequest(req);
+    if (req.allocated_bed_category && beds.some((b) => b.category.toLowerCase() === req.allocated_bed_category?.toLowerCase())) {
+      setSelectedBedCategory(req.allocated_bed_category);
+    } else if (beds.length > 0) {
+      const avail = beds.find((b) => b.available_beds > 0) || beds[0];
+      setSelectedBedCategory(avail.category);
+    }
+  };
+
   // Request Triage & Allocation
   const handleTriageSubmit = async () => {
     if (!triageRequest) return;
     try {
+      // Find matching bed category to decrement
+      const targetBed = beds.find(
+        (b) =>
+          b.category.toLowerCase() === selectedBedCategory.toLowerCase() ||
+          b.category.toLowerCase().includes(selectedBedCategory.toLowerCase()) ||
+          selectedBedCategory.toLowerCase().includes(b.category.toLowerCase())
+      ) || beds.find((b) => b.available_beds > 0);
+
+      // Optimistic instant UI update
+      if (targetBed) {
+        setBeds((prev) =>
+          prev.map((b) =>
+            b.id === targetBed.id
+              ? {
+                  ...b,
+                  available_beds: Math.max(0, b.available_beds - 1),
+                  occupied_beds: (b.occupied_beds || 0) + 1,
+                }
+              : b
+          )
+        );
+      }
+
       const updated = await updateRequestStatus(triageRequest.id, {
         status: "BED_ALLOCATED",
-        allocated_bed_category: selectedBedCategory,
+        allocated_bed_category: targetBed ? targetBed.category : selectedBedCategory,
       });
+
+      // Explicitly decrement bed count on backend database to guarantee sync
+      if (targetBed && targetBed.available_beds > 0) {
+        try {
+          await adjustBedCount(targetBed.id, -1);
+        } catch (e) {
+          console.warn("adjustBedCount fallback:", e);
+        }
+      }
+
       setRequests((prev) => prev.map((r) => (r.id === triageRequest.id ? updated : r)));
       setTriageRequest(null);
-      loadAllData(session?.hospital_id || undefined);
+      await loadAllData(session?.hospital_id || undefined, true);
     } catch (err: any) {
       alert(err.message || "Failed to triage request.");
+      await loadAllData(session?.hospital_id || undefined, true);
     }
   };
 
   const handleAdmitRequest = async (requestId: number) => {
     try {
-      const updated = await updateRequestStatus(requestId, { status: "ADMITTED" });
+      const targetReq = requests.find((r) => r.id === requestId);
+      const isPriorAllocated = targetReq?.status === "BED_ALLOCATED";
+
+      // If admitting directly without prior allocation, find a bed to decrement
+      let bedToDecrement: BedCategory | undefined;
+      if (!isPriorAllocated) {
+        bedToDecrement = beds.find(
+          (b) =>
+            (targetReq?.allocated_bed_category &&
+              (b.category.toLowerCase() === targetReq.allocated_bed_category.toLowerCase() ||
+               b.category.toLowerCase().includes(targetReq.allocated_bed_category.toLowerCase()))) ||
+            b.available_beds > 0
+        ) || beds[0];
+
+        if (bedToDecrement) {
+          // Optimistic UI update
+          setBeds((prev) =>
+            prev.map((b) =>
+              b.id === bedToDecrement!.id
+                ? {
+                    ...b,
+                    available_beds: Math.max(0, b.available_beds - 1),
+                    occupied_beds: (b.occupied_beds || 0) + 1,
+                  }
+                : b
+            )
+          );
+        }
+      }
+
+      const updated = await updateRequestStatus(requestId, {
+        status: "ADMITTED",
+        allocated_bed_category: targetReq?.allocated_bed_category || bedToDecrement?.category,
+      });
+
+      // If direct admit, ensure bed count is adjusted on backend
+      if (!isPriorAllocated && bedToDecrement && bedToDecrement.available_beds > 0) {
+        try {
+          await adjustBedCount(bedToDecrement.id, -1);
+        } catch (e) {
+          console.warn("adjustBedCount fallback on admit:", e);
+        }
+      }
+
       setRequests((prev) => prev.map((r) => (r.id === requestId ? updated : r)));
+      await loadAllData(session?.hospital_id || undefined, true);
     } catch (err: any) {
-      alert(err.message);
+      alert(err.message || "Failed to admit patient.");
+      await loadAllData(session?.hospital_id || undefined, true);
     }
+  };
+
+  const handleCompleteRequest = async (requestId: number) => {
+    if (!confirm("Confirm patient care completed / discharge? This will release the bed back to available inventory.")) return;
+    try {
+      const targetReq = requests.find((r) => r.id === requestId);
+      const updated = await updateRequestStatus(requestId, { status: "COMPLETED" });
+
+      // Release bed back to inventory if allocated
+      if (targetReq?.allocated_bed_category) {
+        const matchingBed = beds.find(
+          (b) =>
+            b.category.toLowerCase() === targetReq.allocated_bed_category?.toLowerCase() ||
+            b.category.toLowerCase().includes(targetReq.allocated_bed_category?.toLowerCase() || "") ||
+            (targetReq.allocated_bed_category?.toLowerCase() || "").includes(b.category.toLowerCase())
+        );
+        if (matchingBed) {
+          try {
+            await adjustBedCount(matchingBed.id, 1);
+          } catch (e) {
+            console.warn("adjustBedCount fallback on complete:", e);
+          }
+        }
+      }
+
+      setRequests((prev) => prev.map((r) => (r.id === requestId ? updated : r)));
+      await loadAllData(session?.hospital_id || undefined, true);
+    } catch (err: any) {
+      alert(err.message || "Failed to mark care completed.");
+      await loadAllData(session?.hospital_id || undefined, true);
+    }
+  };
+
+  const handleDivertRequest = async (requestId: number) => {
+    const reason = prompt(
+      "Enter reason for diversion / rerouting (e.g. ICU at capacity, specialized surgery needed):",
+      "Facility at capacity, rerouted to nearest trauma center"
+    );
+    if (reason === null) return;
+    try {
+      const targetReq = requests.find((r) => r.id === requestId);
+      const updated = await updateRequestStatus(requestId, {
+        status: "DIVERTED",
+        notes: reason ? `${targetReq?.notes ? targetReq.notes + " • " : ""}[Diverted: ${reason}]` : targetReq?.notes,
+      });
+
+      // If bed was allocated, release back to available beds
+      if (targetReq?.status === "BED_ALLOCATED" || targetReq?.status === "ADMITTED") {
+        if (targetReq.allocated_bed_category) {
+          const matchingBed = beds.find(
+            (b) =>
+              b.category.toLowerCase() === targetReq.allocated_bed_category?.toLowerCase() ||
+              b.category.toLowerCase().includes(targetReq.allocated_bed_category?.toLowerCase() || "") ||
+              (targetReq.allocated_bed_category?.toLowerCase() || "").includes(b.category.toLowerCase())
+          );
+          if (matchingBed) {
+            try {
+              await adjustBedCount(matchingBed.id, 1);
+            } catch (e) {
+              console.warn("adjustBedCount fallback on divert:", e);
+            }
+          }
+        }
+      }
+
+      setRequests((prev) => prev.map((r) => (r.id === requestId ? updated : r)));
+      await loadAllData(session?.hospital_id || undefined, true);
+    } catch (err: any) {
+      alert(err.message || "Failed to divert request.");
+      await loadAllData(session?.hospital_id || undefined, true);
+    }
+  };
+
+  const renderRequestStatusBadge = (status: string) => {
+    const s = status.toUpperCase();
+    if (s === "COMPLETED" || s === "DISCHARGED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 text-[11px] font-bold border border-emerald-300/40">
+          <CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+          Care Completed
+        </span>
+      );
+    }
+    if (s === "REJECTED" || s === "CANCELLED" || s === "DIVERTED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-error-container text-on-error-container text-[11px] font-bold border border-error/30">
+          <XCircle className="w-3 h-3 text-error" />
+          Rerouted / Diverted
+        </span>
+      );
+    }
+    if (s === "ADMITTED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-teal-100 text-teal-800 dark:bg-teal-950/60 dark:text-teal-300 text-[11px] font-bold border border-teal-300/40">
+          <BedDouble className="w-3 h-3 text-teal-600 dark:text-teal-400" />
+          Admitted to Bay
+        </span>
+      );
+    }
+    if (s === "BED_ALLOCATED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary-fixed text-on-primary-fixed text-[11px] font-bold">
+          <CheckCircle2 className="w-3 h-3 text-primary" />
+          Bed Allocated
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-surface-container text-on-surface-variant text-[11px] font-bold">
+        <Clock className="w-3 h-3 text-on-surface-variant" />
+        Pending Triage
+      </span>
+    );
   };
 
   // Transfer Submit
@@ -302,8 +549,19 @@ export default function HospitalDashboardPage() {
   const erBed = beds.find((b) => b.category.toUpperCase().includes("ER") || b.category.toUpperCase().includes("EMERGENCY") || b.category.toUpperCase().includes("TRIAGE"));
 
   const pendingRequests = requests.filter((r) => r.status === "PENDING");
+  const criticalRequests = requests.filter((r) => r.severity === "CRITICAL" || r.severity === "URGENT");
+  const activeRequests = requests.filter((r) => r.status === "PENDING" || r.status === "BED_ALLOCATED" || r.status === "ADMITTED");
+  const completedRequests = requests.filter((r) => r.status === "COMPLETED" || r.status === "DISCHARGED");
+  const divertedRequests = requests.filter((r) => r.status === "DIVERTED" || r.status === "REJECTED" || r.status === "CANCELLED");
+
   const filteredRequests = queueFilter === "CRITICAL"
-    ? requests.filter((r) => r.severity === "CRITICAL" || r.severity === "URGENT")
+    ? criticalRequests
+    : queueFilter === "ACTIVE"
+    ? activeRequests
+    : queueFilter === "COMPLETED"
+    ? completedRequests
+    : queueFilter === "DIVERTED"
+    ? divertedRequests
     : requests;
 
   return (
@@ -1031,7 +1289,7 @@ export default function HospitalDashboardPage() {
                         </p>
                       </div>
 
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="text-[11px] font-bold text-outline uppercase tracking-wider">Queue:</span>
                         <button
                           type="button"
@@ -1046,14 +1304,47 @@ export default function HospitalDashboardPage() {
                         </button>
                         <button
                           type="button"
-                          onClick={() => setQueueFilter("CRITICAL")}
+                          onClick={() => setQueueFilter("ACTIVE")}
                           className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                            queueFilter === "CRITICAL"
+                            queueFilter === "ACTIVE"
                               ? "bg-secondary text-white"
                               : "bg-surface-container text-on-surface-variant hover:text-on-surface"
                           }`}
                         >
-                          Critical Only
+                          Active ({activeRequests.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setQueueFilter("CRITICAL")}
+                          className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
+                            queueFilter === "CRITICAL"
+                              ? "bg-error text-white"
+                              : "bg-surface-container text-on-surface-variant hover:text-on-surface"
+                          }`}
+                        >
+                          Critical ({criticalRequests.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setQueueFilter("COMPLETED")}
+                          className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
+                            queueFilter === "COMPLETED"
+                              ? "bg-emerald-600 text-white"
+                              : "bg-surface-container text-on-surface-variant hover:text-on-surface"
+                          }`}
+                        >
+                          Care Completed ({completedRequests.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setQueueFilter("DIVERTED")}
+                          className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
+                            queueFilter === "DIVERTED"
+                              ? "bg-red-600 text-white"
+                              : "bg-surface-container text-on-surface-variant hover:text-on-surface"
+                          }`}
+                        >
+                          Rerouted / Diverted ({divertedRequests.length})
                         </button>
                       </div>
                     </div>
@@ -1109,8 +1400,8 @@ export default function HospitalDashboardPage() {
                                 </td>
                                 <td className="py-3 px-4">
                                   <div className="text-on-surface font-semibold">{req.emergency_type}</div>
-                                  <div className="text-[11px] text-on-surface-variant">
-                                    Status: <span className="font-bold text-primary">{req.status}</span>
+                                  <div className="text-[11px] text-on-surface-variant flex items-center gap-1.5 mt-1">
+                                    {renderRequestStatusBadge(req.status)}
                                   </div>
                                 </td>
                                 <td className="py-3 px-4 whitespace-nowrap">
@@ -1121,29 +1412,79 @@ export default function HospitalDashboardPage() {
                                   <div className="text-[11px] text-on-surface-variant font-mono">{req.contact_phone}</div>
                                 </td>
                                 <td className="py-3 px-4 text-right whitespace-nowrap">
-                                  {req.status === "PENDING" ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setTriageRequest(req);
-                                      }}
-                                      className="px-3 py-1.5 rounded-lg bg-secondary hover:bg-secondary-container text-white text-xs font-bold shadow-sm transition-all"
-                                    >
-                                      Review & Allocate
-                                    </button>
-                                  ) : req.status === "BED_ALLOCATED" ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => handleAdmitRequest(req.id)}
-                                      className="px-3 py-1.5 rounded-lg bg-tertiary hover:bg-tertiary-container text-white text-xs font-bold shadow-sm transition-all"
-                                    >
-                                      Admit to Bay
-                                    </button>
-                                  ) : (
-                                    <span className="px-2.5 py-1 rounded-full bg-surface-container text-on-surface-variant text-[11px] font-bold">
-                                      {req.status}
-                                    </span>
-                                  )}
+                                  <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                                    {req.status === "PENDING" && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => openTriageModal(req)}
+                                          className="px-3 py-1.5 rounded-lg bg-secondary hover:bg-secondary-container text-white text-xs font-bold shadow-sm transition-all"
+                                        >
+                                          Review & Allocate
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDivertRequest(req.id)}
+                                          className="px-2.5 py-1.5 rounded-lg border border-error/50 text-error hover:bg-error-container hover:text-on-error-container text-xs font-bold transition-all"
+                                          title="Reroute / Divert to another facility"
+                                        >
+                                          Divert
+                                        </button>
+                                      </>
+                                    )}
+                                    {req.status === "BED_ALLOCATED" && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleAdmitRequest(req.id)}
+                                          className="px-3 py-1.5 rounded-lg bg-tertiary hover:bg-tertiary-container text-white text-xs font-bold shadow-sm transition-all"
+                                        >
+                                          Admit to Bay
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDivertRequest(req.id)}
+                                          className="px-2.5 py-1.5 rounded-lg border border-error/50 text-error hover:bg-error-container hover:text-on-error-container text-xs font-bold transition-all"
+                                          title="Reroute / Divert to another facility"
+                                        >
+                                          Divert
+                                        </button>
+                                      </>
+                                    )}
+                                    {req.status === "ADMITTED" && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleCompleteRequest(req.id)}
+                                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition-all inline-flex items-center gap-1"
+                                          title="Mark care completed and discharge"
+                                        >
+                                          <CheckCircle2 className="w-3.5 h-3.5" />
+                                          Care Completed
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleDivertRequest(req.id)}
+                                          className="px-2.5 py-1.5 rounded-lg border border-error/50 text-error hover:bg-error-container hover:text-on-error-container text-xs font-bold transition-all"
+                                          title="Reroute / Divert to another facility"
+                                        >
+                                          Divert
+                                        </button>
+                                      </>
+                                    )}
+                                    {(req.status === "COMPLETED" || req.status === "DISCHARGED") && (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 text-[11px] font-bold border border-emerald-300/40">
+                                        <CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                                        Care Completed
+                                      </span>
+                                    )}
+                                    {(req.status === "DIVERTED" || req.status === "REJECTED" || req.status === "CANCELLED") && (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-error-container text-on-error-container text-[11px] font-bold border border-error/30">
+                                        <XCircle className="w-3 h-3 text-error" />
+                                        Rerouted / Diverted
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                               </tr>
                             ))
@@ -1647,26 +1988,80 @@ export default function HospitalDashboardPage() {
                               {r.severity}
                             </span>
                           </td>
-                          <td className="py-3 px-4 font-bold text-primary">{r.status}</td>
+                          <td className="py-3 px-4 font-bold text-primary">
+                            {renderRequestStatusBadge(r.status)}
+                          </td>
                           <td className="py-3 px-4 text-right">
-                            {r.status === "PENDING" && (
-                              <button
-                                type="button"
-                                onClick={() => setTriageRequest(r)}
-                                className="px-3 py-1 rounded bg-secondary hover:bg-secondary-container text-white font-bold text-xs"
-                              >
-                                Allocate Bed
-                              </button>
-                            )}
-                            {r.status === "BED_ALLOCATED" && (
-                              <button
-                                type="button"
-                                onClick={() => handleAdmitRequest(r.id)}
-                                className="px-3 py-1 rounded bg-tertiary hover:bg-tertiary-container text-white font-bold text-xs"
-                              >
-                                Mark Admitted
-                              </button>
-                            )}
+                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                              {r.status === "PENDING" && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => openTriageModal(r)}
+                                    className="px-3 py-1 rounded bg-secondary hover:bg-secondary-container text-white font-bold text-xs"
+                                  >
+                                    Allocate Bed
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDivertRequest(r.id)}
+                                    className="px-2 py-1 rounded border border-error/50 text-error hover:bg-error-container hover:text-on-error-container font-bold text-xs"
+                                  >
+                                    Divert
+                                  </button>
+                                </>
+                              )}
+                              {r.status === "BED_ALLOCATED" && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleAdmitRequest(r.id)}
+                                    className="px-3 py-1 rounded bg-tertiary hover:bg-tertiary-container text-white font-bold text-xs"
+                                  >
+                                    Mark Admitted
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDivertRequest(r.id)}
+                                    className="px-2 py-1 rounded border border-error/50 text-error hover:bg-error-container hover:text-on-error-container font-bold text-xs"
+                                  >
+                                    Divert
+                                  </button>
+                                </>
+                              )}
+                              {r.status === "ADMITTED" && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCompleteRequest(r.id)}
+                                    className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs inline-flex items-center gap-1"
+                                    title="Mark care completed"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    Care Completed
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDivertRequest(r.id)}
+                                    className="px-2 py-1 rounded border border-error/50 text-error hover:bg-error-container hover:text-on-error-container font-bold text-xs"
+                                  >
+                                    Divert
+                                  </button>
+                                </>
+                              )}
+                              {(r.status === "COMPLETED" || r.status === "DISCHARGED") && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 text-[11px] font-bold border border-emerald-300/40">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                                  Care Completed
+                                </span>
+                              )}
+                              {(r.status === "DIVERTED" || r.status === "REJECTED" || r.status === "CANCELLED") && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-error-container text-on-error-container text-[11px] font-bold border border-error/30">
+                                  <XCircle className="w-3 h-3 text-error" />
+                                  Rerouted / Diverted
+                                </span>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1785,7 +2180,11 @@ export default function HospitalDashboardPage() {
 
           {/* ===================== VIEW 6: PATIENT BILLING & PAYMENTS ===================== */}
           {activeTab === "billing" && (
-            <BillingManagementTab session={session} />
+            <BillingManagementTab
+              session={session}
+              allRequests={requests}
+              onRefreshRequests={() => loadAllData(session?.hospital_id || undefined)}
+            />
           )}
 
           {/* ===================== VIEW 7: BLOOD BANK & DONORS ===================== */}
@@ -1869,59 +2268,188 @@ export default function HospitalDashboardPage() {
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
           <form
             onSubmit={handleAddBed}
-            className="bg-surface-container-lowest rounded-2xl max-w-md w-full p-6 shadow-2xl border border-outline-variant/40 space-y-4 animate-fade-in"
+            className="bg-surface-container-lowest rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-outline-variant/40 space-y-4 animate-fade-in max-h-[90vh] overflow-y-auto"
           >
             <div className="flex items-center justify-between pb-2 border-b border-outline-variant/30">
-              <h3 className="font-bold text-lg text-on-surface">Add Bed Category</h3>
-              <button type="button" onClick={() => setShowAddBedModal(false)} className="p-1 rounded hover:bg-surface-container">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-primary/10 text-primary flex items-center justify-center font-bold">
+                  <BedDouble className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-on-surface">Add Bed Category & Ward</h3>
+                  <p className="text-[11px] text-on-surface-variant">Select standard clinical bed types or create a custom ward</p>
+                </div>
+              </div>
+              <button type="button" onClick={() => setShowAddBedModal(false)} className="p-1 rounded-lg hover:bg-surface-container">
                 <X className="w-5 h-5 text-on-surface-variant" />
               </button>
             </div>
 
-            <div className="space-y-3 text-xs">
+            <div className="space-y-4 text-xs">
+              {/* Preset Selector Dropdown */}
               <div>
-                <label className="font-bold text-on-surface">Category Name</label>
+                <label className="font-bold text-on-surface block mb-1">
+                  Choose Standard Bed Type Preset <span className="text-primary font-normal">(Auto-fills category & tariff)</span>
+                </label>
+                <select
+                  value={ALL_BED_PRESETS.some((p) => p.label === addBedForm.category) ? addBedForm.category : ""}
+                  onChange={(e) => {
+                    const found = ALL_BED_PRESETS.find((p) => p.label === e.target.value);
+                    if (found) {
+                      setAddBedForm({
+                        ...addBedForm,
+                        category: found.label,
+                        price_per_day: found.price
+                      });
+                    }
+                  }}
+                  className="w-full p-2.5 rounded-xl border border-outline-variant/50 text-xs bg-surface text-on-surface focus:outline-none focus:border-primary font-medium"
+                >
+                  <option value="">-- Or pick from all standard hospital bed types --</option>
+                  <optgroup label="Critical Care (ICU / HDU / PICU / NICU)">
+                    {ALL_BED_PRESETS.filter((p) => p.group === "Critical Care").map((p) => (
+                      <option key={p.label} value={p.label}>
+                        {p.label} — ₹{p.price.toLocaleString("en-IN")}/day
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="General & In-Patient Wards">
+                    {ALL_BED_PRESETS.filter((p) => p.group === "General Wards").map((p) => (
+                      <option key={p.label} value={p.label}>
+                        {p.label} — ₹{p.price.toLocaleString("en-IN")}/day
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Emergency & Specialized Units">
+                    {ALL_BED_PRESETS.filter((p) => p.group === "Emergency & Specialty").map((p) => (
+                      <option key={p.label} value={p.label}>
+                        {p.label} — ₹{p.price.toLocaleString("en-IN")}/day
+                      </option>
+                    ))}
+                  </optgroup>
+                </select>
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div>
+                <label className="text-[11px] font-bold text-outline uppercase tracking-wider block mb-1.5">
+                  Popular Bed Quick-Select:
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { name: "ICU Bed", full: "ICU (Intensive Care Unit) Bed", price: 5000 },
+                    { name: "HDU Bed", full: "HDU (High Dependency Unit) Bed", price: 3500 },
+                    { name: "NICU Bed", full: "NICU (Neonatal Intensive Care) Bed", price: 5000 },
+                    { name: "General Ward", full: "General Ward Bed (Common / Mixed)", price: 1000 },
+                    { name: "Oxygen Ward", full: "Oxygen Supported Ward Bed", price: 1800 },
+                    { name: "Semi-Private", full: "Semi-Private Room (Twin Sharing) Bed", price: 2200 },
+                    { name: "Deluxe Single", full: "Private Single Deluxe Room Bed", price: 3800 },
+                    { name: "Trauma Bay", full: "Emergency / Trauma Bay Bed", price: 1500 },
+                    { name: "Isolation", full: "Isolation Ward Bed (Infectious Diseases)", price: 2800 },
+                  ].map((chip) => (
+                    <button
+                      key={chip.name}
+                      type="button"
+                      onClick={() => setAddBedForm({
+                        ...addBedForm,
+                        category: chip.full,
+                        price_per_day: chip.price
+                      })}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all ${
+                        addBedForm.category === chip.full
+                          ? "bg-primary text-white border-primary shadow-xs"
+                          : "bg-surface hover:bg-surface-container border-outline-variant/40 text-on-surface"
+                      }`}
+                    >
+                      {chip.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Exact Category Name input */}
+              <div>
+                <label className="font-bold text-on-surface">Category Name *</label>
                 <input
                   type="text"
-                  placeholder="e.g. Pediatric ICU, Cardiac Care"
+                  placeholder="e.g. ICU (Intensive Care Unit) Bed or Custom Ward"
                   value={addBedForm.category}
                   onChange={(e) => setAddBedForm({ ...addBedForm, category: e.target.value })}
-                  className="w-full mt-1 p-2.5 rounded-lg border border-outline-variant/50 text-xs"
+                  className="w-full mt-1 p-2.5 rounded-xl border border-outline-variant/50 text-xs bg-surface text-on-surface focus:outline-none focus:border-primary font-medium"
                   required
                 />
               </div>
 
+              {/* Total & Available Beds */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="font-bold text-on-surface">Total Beds</label>
+                  <div className="flex items-center justify-between">
+                    <label className="font-bold text-on-surface">Total Beds *</label>
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setAddBedForm({ ...addBedForm, total_beds: Math.max(1, addBedForm.total_beds + 5) })}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-surface-container hover:bg-surface-container-high text-primary font-bold"
+                      >
+                        +5
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAddBedForm({ ...addBedForm, total_beds: Math.max(1, addBedForm.total_beds + 10) })}
+                        className="text-[10px] px-1.5 py-0.5 rounded bg-surface-container hover:bg-surface-container-high text-primary font-bold"
+                      >
+                        +10
+                      </button>
+                    </div>
+                  </div>
                   <input
                     type="number"
+                    min="1"
                     value={addBedForm.total_beds}
-                    onChange={(e) => setAddBedForm({ ...addBedForm, total_beds: parseInt(e.target.value) || 0 })}
-                    className="w-full mt-1 p-2.5 rounded-lg border border-outline-variant/50 text-xs"
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value) || 0;
+                      setAddBedForm({
+                        ...addBedForm,
+                        total_beds: val,
+                        available_beds: Math.min(addBedForm.available_beds, val)
+                      });
+                    }}
+                    className="w-full mt-1 p-2.5 rounded-xl border border-outline-variant/50 text-xs bg-surface font-semibold"
                     required
                   />
                 </div>
+
                 <div>
-                  <label className="font-bold text-on-surface">Available Beds</label>
+                  <label className="font-bold text-on-surface">Available Free Beds *</label>
                   <input
                     type="number"
+                    min="0"
+                    max={addBedForm.total_beds}
                     value={addBedForm.available_beds}
                     onChange={(e) => setAddBedForm({ ...addBedForm, available_beds: parseInt(e.target.value) || 0 })}
-                    className="w-full mt-1 p-2.5 rounded-lg border border-outline-variant/50 text-xs"
+                    className="w-full mt-1 p-2.5 rounded-xl border border-outline-variant/50 text-xs bg-surface font-semibold"
                     required
                   />
                 </div>
               </div>
 
+              {/* Daily Tariff */}
               <div>
-                <label className="font-bold text-on-surface">Daily Tariff (₹)</label>
-                <input
-                  type="number"
-                  value={addBedForm.price_per_day}
-                  onChange={(e) => setAddBedForm({ ...addBedForm, price_per_day: parseFloat(e.target.value) || 0 })}
-                  className="w-full mt-1 p-2.5 rounded-lg border border-outline-variant/50 text-xs"
-                />
+                <label className="font-bold text-on-surface">Daily Tariff Rate (₹ per day)</label>
+                <div className="relative mt-1">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant font-bold">₹</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="50"
+                    value={addBedForm.price_per_day}
+                    onChange={(e) => setAddBedForm({ ...addBedForm, price_per_day: parseFloat(e.target.value) || 0 })}
+                    className="w-full pl-7 pr-3 p-2.5 rounded-xl border border-outline-variant/50 text-xs bg-surface font-semibold"
+                  />
+                </div>
+                <p className="text-[11px] text-on-surface-variant mt-1">
+                  Published daily tariff helps patients and referral networks calculate estimates transparently.
+                </p>
               </div>
             </div>
 
@@ -1929,15 +2457,15 @@ export default function HospitalDashboardPage() {
               <button
                 type="button"
                 onClick={() => setShowAddBedModal(false)}
-                className="px-4 py-2 rounded-lg text-xs font-bold text-on-surface-variant hover:bg-surface-container"
+                className="px-4 py-2 rounded-xl text-xs font-bold text-on-surface-variant hover:bg-surface-container transition-colors"
               >
                 Cancel
               </button>
               <button
                 type="submit"
-                className="px-5 py-2 rounded-lg bg-primary hover:bg-primary-container text-white text-xs font-bold shadow-sm"
+                className="px-5 py-2 rounded-xl bg-primary hover:bg-primary-container text-white text-xs font-bold shadow-sm transition-all"
               >
-                Create Ward Category
+                Create Bed Category
               </button>
             </div>
           </form>

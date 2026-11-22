@@ -40,6 +40,7 @@ import {
 import {
   getStoredSession,
   clearSession,
+  subscribeToDataChanges,
   getAdminApplications,
   verifyHospitalApplication,
   getAdminHospitals,
@@ -97,6 +98,21 @@ export default function AdminDashboardPage() {
     }
     setSession(s);
     loadAllAdminData();
+
+    // Instant cross-tab real-time sync when hospital statuses or billing changes
+    const unsubscribe = subscribeToDataChanges(() => {
+      loadAllAdminData();
+    });
+
+    // Background polling fallback every 8 seconds
+    const interval = setInterval(() => {
+      loadAllAdminData();
+    }, 8000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
   }, []);
 
   const loadAllAdminData = async () => {

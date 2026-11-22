@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../core/config/app_config.dart';
 import '../data/models/hospital_model.dart';
@@ -17,15 +18,27 @@ class HospitalProvider extends ChangeNotifier {
 
   String _searchQuery = '';
   String _selectedCategory = 'All';
-  double? _selectedRadiusKm = 10.0;
+  double? _selectedRadiusKm; // defaults to null (Any Distance / All Facilities)
   String _selectedCity = 'All';
 
   double _userLat = AppConfig.defaultLatitude;
   double _userLng = AppConfig.defaultLongitude;
   String _locationName = AppConfig.defaultLocationName;
 
+  Timer? _telemetryTimer;
+
   HospitalProvider(this._hospitalRepo, this._storage) {
     fetchHospitals();
+    // Live background telemetry polling every 8 seconds
+    _telemetryTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      fetchHospitals(silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _telemetryTimer?.cancel();
+    super.dispose();
   }
 
   // Getters
@@ -64,10 +77,12 @@ class HospitalProvider extends ChangeNotifier {
   }
 
   // Actions
-  Future<void> fetchHospitals() async {
-    _isLoading = true;
-    _errorMessage = null;
-    notifyListeners();
+  Future<void> fetchHospitals({bool silent = false}) async {
+    if (!silent) {
+      _isLoading = true;
+      _errorMessage = null;
+      notifyListeners();
+    }
 
     try {
       String? bedTypeParam;
@@ -75,17 +90,24 @@ class HospitalProvider extends ChangeNotifier {
         bedTypeParam = 'ICU';
       } else if (_selectedCategory == 'General') {
         bedTypeParam = 'General';
+      } else if (_selectedCategory == 'Emergency 24/7' || _selectedCategory == 'Emergency') {
+        bedTypeParam = 'ER';
+      } else if (_selectedCategory == 'Pediatric Care' || _selectedCategory == 'Pediatric') {
+        bedTypeParam = 'PICU';
+      } else if (_selectedCategory == 'Oxygen Supply' || _selectedCategory == 'Oxygen') {
+        bedTypeParam = 'Oxygen';
       }
 
-      _hospitals = await _hospitalRepo.getHospitals(
-        q: _searchQuery.isNotEmpty ? _searchQuery : null,
-        city: _selectedCity,
+      final results = await _hospitalRepo.getHospitals(
+        q: _searchQuery.trim().isNotEmpty ? _searchQuery.trim() : null,
+        city: _selectedCity != 'All' ? _selectedCity : null,
         bedType: bedTypeParam,
         lat: _userLat,
         lng: _userLng,
         radiusKm: _selectedRadiusKm,
       );
 
+      _hospitals = results;
       _isLoading = false;
       notifyListeners();
     } catch (e) {
@@ -131,16 +153,27 @@ class HospitalProvider extends ChangeNotifier {
   }
 
   Future<void> selectHospital(int hospitalId) async {
-    _isDetailLoading = true;
-    _errorMessage = null;
-    notifyListeners();
+    // 1. Instant optimistic selection from already fetched facilities
+    final existing = _hospitals.where((h) => h.id == hospitalId).firstOrNull;
+    if (existing != null) {
+      _selectedHospital = existing;
+      _isDetailLoading = false;
+      notifyListeners();
+    } else {
+      _isDetailLoading = true;
+      _errorMessage = null;
+      notifyListeners();
+    }
 
     try {
-      _selectedHospital = await _hospitalRepo.getHospitalDetail(hospitalId);
+      final detail = await _hospitalRepo.getHospitalDetail(hospitalId);
+      _selectedHospital = detail;
       _isDetailLoading = false;
       notifyListeners();
     } catch (e) {
-      _errorMessage = e.toString();
+      if (_selectedHospital == null) {
+        _errorMessage = e.toString();
+      }
       _isDetailLoading = false;
       notifyListeners();
     }

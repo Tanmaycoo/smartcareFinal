@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/theme/app_theme.dart';
+import 'blood/blood_donation_screen.dart';
 import 'discovery/find_hospitals_screen.dart';
 import 'home/home_screen.dart';
 import 'profile/profile_screen.dart';
@@ -24,13 +25,15 @@ class _MainShellState extends State<MainShell> {
     final screens = [
       HomeScreen(
         onNavigateToFind: () => _navigateToTab(1),
-        onProfileTap: () => _navigateToTab(3),
+        onProfileTap: () => _navigateToTab(4),
+        onNavigateToBlood: () => _navigateToTab(2),
       ),
       FindHospitalsScreen(
-        onProfileTap: () => _navigateToTab(3),
+        onProfileTap: () => _navigateToTab(4),
       ),
+      const BloodDonationScreen(),
       TicketTrackingScreen(
-        onProfileTap: () => _navigateToTab(3),
+        onProfileTap: () => _navigateToTab(4),
       ),
       const ProfileScreen(),
     ];
@@ -64,16 +67,23 @@ class _MainShellState extends State<MainShell> {
                   index: 1,
                   icon: Icons.local_hospital_outlined,
                   activeIcon: Icons.local_hospital,
-                  label: 'Find Hospitals',
+                  label: 'Hospitals',
                 ),
                 _buildNavItem(
                   index: 2,
-                  icon: Icons.confirmation_number_outlined,
-                  activeIcon: Icons.confirmation_number,
-                  label: 'Saved & Track',
+                  icon: Icons.bloodtype_outlined,
+                  activeIcon: Icons.bloodtype,
+                  activeColor: const Color(0xFFE11D48),
+                  label: 'Blood Bank',
                 ),
                 _buildNavItem(
                   index: 3,
+                  icon: Icons.confirmation_number_outlined,
+                  activeIcon: Icons.confirmation_number,
+                  label: 'Track',
+                ),
+                _buildNavItem(
+                  index: 4,
                   icon: Icons.person_outline,
                   activeIcon: Icons.person,
                   label: 'Profile',
@@ -91,9 +101,10 @@ class _MainShellState extends State<MainShell> {
     required IconData icon,
     required IconData activeIcon,
     required String label,
+    Color? activeColor,
   }) {
     final isSelected = _currentIndex == index;
-    final color = isSelected ? AppTheme.primary : AppTheme.onSurfaceVariant;
+    final color = isSelected ? (activeColor ?? AppTheme.primary) : AppTheme.onSurfaceVariant;
 
     return Expanded(
       child: InkWell(

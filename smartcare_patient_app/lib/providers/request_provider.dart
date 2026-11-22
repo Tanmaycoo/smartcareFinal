@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../data/models/patient_request_model.dart';
 import '../data/repositories/request_repository.dart';
+import '../data/services/storage_service.dart';
 
 class RequestProvider extends ChangeNotifier {
   final RequestRepository _repo;
+  final StorageService? _storage;
 
   PatientRequestModel? _trackedTicket;
   PatientRequestModel? _lastCreatedTicket;
@@ -13,7 +16,20 @@ class RequestProvider extends ChangeNotifier {
   String? _errorMessage;
   String? _successMessage;
 
-  RequestProvider(this._repo);
+  Timer? _pollingTimer;
+
+  RequestProvider(this._repo, [this._storage]) {
+    final savedCode = _storage?.getLastTicketCode();
+    if (savedCode != null && savedCode.isNotEmpty) {
+      trackTicket(savedCode, silent: true);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pollingTimer?.cancel();
+    super.dispose();
+  }
 
   PatientRequestModel? get trackedTicket => _trackedTicket;
   PatientRequestModel? get lastCreatedTicket => _lastCreatedTicket;
@@ -53,9 +69,13 @@ class RequestProvider extends ChangeNotifier {
 
       _lastCreatedTicket = ticket;
       _trackedTicket = ticket;
+      _storage?.saveLastTicketCode(ticket.ticketCode);
       _successMessage = 'Emergency request dispatched! Ticket #${ticket.ticketCode}';
       _isSubmitting = false;
       notifyListeners();
+
+      // Start live real-time auto-polling every 3 seconds
+      startLiveTracking(ticket.ticketCode);
       return ticket;
     } catch (e) {
       _errorMessage = e.toString();
@@ -65,25 +85,60 @@ class RequestProvider extends ChangeNotifier {
     }
   }
 
-  Future<bool> trackTicket(String ticketCode) async {
-    _isTracking = true;
-    _errorMessage = null;
-    notifyListeners();
+  Future<bool> trackTicket(String ticketCode, {bool silent = false}) async {
+    if (ticketCode.trim().isEmpty) return false;
+
+    if (!silent) {
+      _isTracking = true;
+      _errorMessage = null;
+      notifyListeners();
+    }
 
     try {
-      _trackedTicket = await _repo.trackTicket(ticketCode);
+      final updated = await _repo.trackTicket(ticketCode.trim());
+      _trackedTicket = updated;
+      _storage?.saveLastTicketCode(ticketCode.trim());
       _isTracking = false;
       notifyListeners();
+
+      // Maintain active live polling
+      startLiveTracking(ticketCode.trim());
       return true;
     } catch (e) {
-      _errorMessage = e.toString();
+      if (!silent) {
+        _errorMessage = e.toString();
+      }
       _isTracking = false;
       notifyListeners();
       return false;
     }
   }
 
+  void startLiveTracking(String ticketCode) {
+    _pollingTimer?.cancel();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      if (_trackedTicket != null) {
+        try {
+          final updated = await _repo.trackTicket(ticketCode);
+          if (_trackedTicket?.status != updated.status ||
+              _trackedTicket?.allocatedBedCategory != updated.allocatedBedCategory ||
+              _trackedTicket?.etaMinutes != updated.etaMinutes ||
+              _trackedTicket?.notes != updated.notes) {
+            _trackedTicket = updated;
+            notifyListeners();
+          }
+        } catch (_) {}
+      }
+    });
+  }
+
+  void stopLiveTracking() {
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
+  }
+
   void clearTrackedTicket() {
+    stopLiveTracking();
     _trackedTicket = null;
     _errorMessage = null;
     _successMessage = null;

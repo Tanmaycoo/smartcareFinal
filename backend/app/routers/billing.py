@@ -1,5 +1,6 @@
 import datetime
 import random
+import re
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -154,6 +155,12 @@ def create_patient_bill(
         patient_user = db.query(models.User).filter(models.User.email == payload.patient_email.strip().lower()).first()
         if patient_user:
             patient_id = patient_user.id
+    if not patient_id and payload.patient_phone:
+        clean_p = re.sub(r"\D", "", payload.patient_phone)
+        if clean_p and len(clean_p) >= 10:
+            patient_user = db.query(models.User).filter(models.User.phone.like(f"%{clean_p[-10:]}%")).first()
+            if patient_user:
+                patient_id = patient_user.id
 
     bill_number = generate_bill_number(db, hospital_id)
 
@@ -458,32 +465,102 @@ def record_bill_payment(
 # PATIENT BILLING ACCESS ENDPOINTS
 # ==============================================================================
 
-@router.get("/patient/bills", response_model=List[schemas.PatientBillOut])
-def get_patient_bills(
+@router.get("/patient/bills/lookup", response_model=List[schemas.PatientBillOut])
+def lookup_patient_bills(
+    query: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    db: Session = Depends(get_db)
 ):
-    # Match patient by patient_id OR patient_email OR patient_phone
-    user_email = (current_user.email or "").strip().lower()
-    user_phone = (current_user.phone or "").strip()
-
-    filters = [models.PatientBill.patient_id == current_user.id]
-    if user_email:
-        filters.append(models.PatientBill.patient_email.ilike(user_email))
-    if user_phone:
-        filters.append(models.PatientBill.patient_phone == user_phone)
-
-    query = db.query(models.PatientBill).filter(
-        or_(*filters),
-        # Do not expose draft bills to patients
+    """
+    Public lookup for patient bills by bill_number, ticket_code, patient_phone,
+    or patient_name. Allows patients to immediately find and track their issued invoices.
+    """
+    base_query = db.query(models.PatientBill).filter(
         models.PatientBill.status.in_(["ISSUED", "PARTIALLY_PAID", "PAID", "OVERDUE"])
     )
 
-    if status_filter and status_filter.upper() != "ALL":
-        query = query.filter(models.PatientBill.status == status_filter.upper())
+    if query and query.strip():
+        q = query.strip()
+        clean_digits = re.sub(r"\D", "", q)
+        q_filter = [
+            models.PatientBill.bill_number.ilike(f"%{q}%"),
+            models.PatientBill.patient_name.ilike(f"%{q}%"),
+            models.PatientBill.patient_email.ilike(f"%{q}%"),
+            models.PatientBill.notes.ilike(f"%{q}%"),
+        ]
+        if clean_digits and len(clean_digits) >= 4:
+            phone_clean_expr = func.replace(func.replace(func.replace(models.PatientBill.patient_phone, '-', ''), ' ', ''), '+', '')
+            q_filter.append(phone_clean_expr.like(f"%{clean_digits}%"))
+            if len(clean_digits) >= 10:
+                q_filter.append(phone_clean_expr.like(f"%{clean_digits[-10:]}%"))
 
-    bills = query.order_by(models.PatientBill.created_at.desc()).all()
+        base_query = base_query.filter(or_(*q_filter))
+
+    if status_filter and status_filter.upper() != "ALL":
+        base_query = base_query.filter(models.PatientBill.status == status_filter.upper())
+
+    bills = base_query.order_by(models.PatientBill.created_at.desc()).limit(50).all()
+    results = []
+
+    for b in bills:
+        hosp = db.query(models.Hospital).filter(models.Hospital.id == b.hospital_id).first()
+        bill_out = schemas.PatientBillOut.from_orm(b)
+        if hosp:
+            bill_out.hospital_name = hosp.name
+            bill_out.hospital_address = hosp.address
+            bill_out.hospital_phone = hosp.emergency_phone
+        results.append(bill_out)
+
+    return results
+
+@router.get("/patient/bills", response_model=List[schemas.PatientBillOut])
+def get_patient_bills(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    query_str: Optional[str] = Query(None, alias="query"),
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(auth.get_current_user_optional)
+):
+    base_query = db.query(models.PatientBill).filter(
+        models.PatientBill.status.in_(["ISSUED", "PARTIALLY_PAID", "PAID", "OVERDUE"])
+    )
+
+    if current_user:
+        user_email = (current_user.email or "").strip().lower()
+        user_phone = (current_user.phone or "").strip()
+        clean_user_phone = re.sub(r"\D", "", user_phone)
+
+        filters = [models.PatientBill.patient_id == current_user.id]
+        if user_email:
+            filters.append(models.PatientBill.patient_email.ilike(user_email))
+        if user_phone:
+            filters.append(models.PatientBill.patient_phone == user_phone)
+        if clean_user_phone and len(clean_user_phone) >= 10:
+            phone_clean_expr = func.replace(func.replace(func.replace(models.PatientBill.patient_phone, '-', ''), ' ', ''), '+', '')
+            filters.append(phone_clean_expr.like(f"%{clean_user_phone[-10:]}%"))
+        if current_user.name and len(current_user.name.strip()) >= 3:
+            filters.append(models.PatientBill.patient_name.ilike(f"%{current_user.name.strip()}%"))
+
+        base_query = base_query.filter(or_(*filters))
+    elif query_str and query_str.strip():
+        q = query_str.strip()
+        clean_digits = re.sub(r"\D", "", q)
+        q_filter = [
+            models.PatientBill.bill_number.ilike(f"%{q}%"),
+            models.PatientBill.patient_name.ilike(f"%{q}%"),
+            models.PatientBill.patient_email.ilike(f"%{q}%"),
+            models.PatientBill.notes.ilike(f"%{q}%"),
+        ]
+        if clean_digits and len(clean_digits) >= 4:
+            phone_clean_expr = func.replace(func.replace(func.replace(models.PatientBill.patient_phone, '-', ''), ' ', ''), '+', '')
+            q_filter.append(phone_clean_expr.like(f"%{clean_digits}%"))
+            if len(clean_digits) >= 10:
+                q_filter.append(phone_clean_expr.like(f"%{clean_digits[-10:]}%"))
+        base_query = base_query.filter(or_(*q_filter))
+
+    if status_filter and status_filter.upper() != "ALL":
+        base_query = base_query.filter(models.PatientBill.status == status_filter.upper())
+
+    bills = base_query.order_by(models.PatientBill.created_at.desc()).limit(50).all()
     results = []
 
     for b in bills:
@@ -501,28 +578,15 @@ def get_patient_bills(
 def get_patient_bill_detail(
     bill_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
+    current_user: Optional[models.User] = Depends(auth.get_current_user_optional)
 ):
     bill = db.query(models.PatientBill).filter(models.PatientBill.id == bill_id).first()
     if not bill:
         raise HTTPException(status_code=404, detail="Bill not found")
 
-    # Authorize: Must be the patient or superadmin
-    user_email = (current_user.email or "").strip().lower()
-    user_phone = (current_user.phone or "").strip()
-
-    is_owner = (
-        bill.patient_id == current_user.id or
-        (bill.patient_email and bill.patient_email.lower() == user_email) or
-        (bill.patient_phone and bill.patient_phone == user_phone) or
-        current_user.role == "ADMIN"
-    )
-
-    if not is_owner:
-        raise HTTPException(status_code=403, detail="You are not authorized to view this bill.")
-
-    if bill.status == "DRAFT" and current_user.role != "ADMIN":
-        raise HTTPException(status_code=404, detail="Bill is not yet issued.")
+    if bill.status == "DRAFT":
+        if not current_user or current_user.role not in ["ADMIN", "HOSPITAL"]:
+            raise HTTPException(status_code=403, detail="Bill is not yet issued.")
 
     hosp = db.query(models.Hospital).filter(models.Hospital.id == bill.hospital_id).first()
     bill_out = schemas.PatientBillOut.from_orm(bill)

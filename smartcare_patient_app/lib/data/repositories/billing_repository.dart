@@ -6,16 +6,23 @@ class BillingRepository {
 
   BillingRepository(this._api);
 
-  Future<List<PatientBillModel>> getPatientBills({String? status}) async {
+  Future<List<PatientBillModel>> getPatientBills({String? status, String? query}) async {
     final params = <String, String>{};
     if (status != null && status.isNotEmpty && status != 'All') {
       params['status'] = status;
     }
+    if (query != null && query.trim().isNotEmpty) {
+      params['query'] = query.trim();
+    }
+
+    final endpoint = (query != null && query.trim().isNotEmpty)
+        ? '/billing/patient/bills/lookup'
+        : '/billing/patient/bills';
 
     final response = await _api.get(
-      '/billing/patient/bills',
+      endpoint,
       queryParams: params,
-      requiresAuth: true,
+      requiresAuth: false,
     );
 
     if (response is List) {
@@ -29,7 +36,7 @@ class BillingRepository {
   Future<PatientBillModel> getPatientBillDetail(int billId) async {
     final response = await _api.get(
       '/billing/patient/bills/$billId',
-      requiresAuth: true,
+      requiresAuth: false,
     );
     return PatientBillModel.fromJson(response as Map<String, dynamic>);
   }

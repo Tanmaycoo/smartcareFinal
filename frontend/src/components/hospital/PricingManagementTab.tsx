@@ -31,6 +31,7 @@ import {
   deactivateHospitalServicePrice,
   getHospitalPriceHistory,
   getHospitalRatePreview,
+  subscribeToDataChanges,
   HospitalService,
   PriceHistory,
   PricingDashboardMetrics,
@@ -55,6 +56,26 @@ const BILLING_UNITS = [
   "per scan",
   "per procedure",
   "per hour"
+];
+
+const STANDARD_SERVICE_PRESETS = [
+  { name: "ICU (Intensive Care) Day Charge", category: "Room and Bed Charges", billing_unit: "per day", price: 5000, code: "ICU-DAY-01", description: "Comprehensive multipara monitoring, intensivist supervision and central oxygen" },
+  { name: "HDU (High Dependency) Day Charge", category: "Room and Bed Charges", billing_unit: "per day", price: 3500, code: "HDU-DAY-01", description: "Step-down critical care monitoring" },
+  { name: "General Ward Bed Charge", category: "Room and Bed Charges", billing_unit: "per day", price: 1000, code: "GEN-WARD-01", description: "General in-patient ward accommodation including nursing service" },
+  { name: "Semi-Private Room (Twin Sharing)", category: "Room and Bed Charges", billing_unit: "per day", price: 2200, code: "SEMI-PVT-01", description: "Twin sharing room with attendant facility" },
+  { name: "Private Single Deluxe Room", category: "Room and Bed Charges", billing_unit: "per day", price: 3800, code: "PVT-DLX-01", description: "Single private room with air conditioning and TV" },
+  { name: "Emergency Triage & Resuscitation", category: "Emergency Services", billing_unit: "per visit", price: 1500, code: "EMG-TRIAGE-01", description: "Urgent ER trauma bay evaluation and initial stabilization" },
+  { name: "Senior Doctor Consultation (In-Patient)", category: "Emergency Services", billing_unit: "per visit", price: 800, code: "DOC-VISIT-01", description: "Specialist medical officer bedside review" },
+  { name: "Advanced Life Support (ALS) Ambulance", category: "Ambulance Services", billing_unit: "per trip", price: 2500, code: "AMB-ALS-01", description: "Equipped with transport ventilator, monitor and paramedic" },
+  { name: "Basic Life Support (BLS) Ambulance", category: "Ambulance Services", billing_unit: "per trip", price: 1500, code: "AMB-BLS-01", description: "Standard emergency transport with basic life support" },
+  { name: "Complete Blood Count (CBC) with ESR", category: "Laboratory Services", billing_unit: "per test", price: 350, code: "LAB-CBC-01", description: "Full automated 5-part hematology profile" },
+  { name: "Liver Function Test (LFT)", category: "Laboratory Services", billing_unit: "per test", price: 750, code: "LAB-LFT-01", description: "Bilirubin, SGOT, SGPT, Alkaline Phosphatase" },
+  { name: "Kidney Function Test (KFT)", category: "Laboratory Services", billing_unit: "per test", price: 700, code: "LAB-KFT-01", description: "Blood Urea Nitrogen (BUN), Serum Creatinine, Electrolytes" },
+  { name: "Digital Chest X-Ray (PA View)", category: "Diagnostic Services", billing_unit: "per scan", price: 750, code: "RAD-XRAY-01", description: "High resolution digital radiography of chest" },
+  { name: "CT Scan (Brain / Head Plain)", category: "Diagnostic Services", billing_unit: "per scan", price: 4500, code: "RAD-CT-01", description: "128-slice rapid computed tomography" },
+  { name: "MRI Scan (Brain / Spine)", category: "Diagnostic Services", billing_unit: "per scan", price: 6500, code: "RAD-MRI-01", description: "1.5 Tesla magnetic resonance imaging" },
+  { name: "Ultrasonography (USG Whole Abdomen)", category: "Diagnostic Services", billing_unit: "per scan", price: 1200, code: "RAD-USG-01", description: "Diagnostic ultrasound with colour doppler evaluation" },
+  { name: "Central Pipeline Oxygen Supply", category: "Other Services", billing_unit: "per hour", price: 150, code: "MED-O2-01", description: "High-flow medical oxygen via nasal cannula or mask" },
 ];
 
 interface Props {
@@ -102,6 +123,14 @@ export default function PricingManagementTab({ session }: Props) {
 
   useEffect(() => {
     loadData();
+
+    const unsubscribe = subscribeToDataChanges(() => {
+      loadData();
+    });
+
+    return () => {
+      unsubscribe();
+    };
   }, [categoryFilter, statusFilter]);
 
   const loadData = async () => {
@@ -601,6 +630,74 @@ export default function PricingManagementTab({ session }: Props) {
             </div>
 
             <div className="space-y-3.5 text-xs">
+              <div>
+                <label className="font-bold text-on-surface block mb-1">
+                  Choose Standard Clinical Preset <span className="text-primary font-normal">(Auto-fills all fields)</span>
+                </label>
+                <select
+                  value={STANDARD_SERVICE_PRESETS.some((p) => p.name === serviceForm.name) ? serviceForm.name : ""}
+                  onChange={(e) => {
+                    const found = STANDARD_SERVICE_PRESETS.find((p) => p.name === e.target.value);
+                    if (found) {
+                      setServiceForm({
+                        ...serviceForm,
+                        name: found.name,
+                        category: found.category,
+                        billing_unit: found.billing_unit,
+                        price: found.price,
+                        service_code: found.code,
+                        description: found.description
+                      });
+                    }
+                  }}
+                  className="w-full p-2.5 rounded-xl border border-outline-variant/50 text-xs bg-surface font-semibold text-on-surface focus:outline-none focus:border-primary"
+                >
+                  <option value="">-- Or pick from standard healthcare service presets --</option>
+                  <optgroup label="Room and Bed Charges">
+                    {STANDARD_SERVICE_PRESETS.filter((p) => p.category === "Room and Bed Charges").map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — ₹{p.price.toLocaleString("en-IN")} ({p.billing_unit})
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Emergency & Consultations">
+                    {STANDARD_SERVICE_PRESETS.filter((p) => p.category === "Emergency Services").map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — ₹{p.price.toLocaleString("en-IN")} ({p.billing_unit})
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Ambulance Services">
+                    {STANDARD_SERVICE_PRESETS.filter((p) => p.category === "Ambulance Services").map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — ₹{p.price.toLocaleString("en-IN")} ({p.billing_unit})
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Laboratory Tests">
+                    {STANDARD_SERVICE_PRESETS.filter((p) => p.category === "Laboratory Services").map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — ₹{p.price.toLocaleString("en-IN")} ({p.billing_unit})
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Diagnostic Imaging & Scans">
+                    {STANDARD_SERVICE_PRESETS.filter((p) => p.category === "Diagnostic Services").map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — ₹{p.price.toLocaleString("en-IN")} ({p.billing_unit})
+                      </option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Other Medical Services">
+                    {STANDARD_SERVICE_PRESETS.filter((p) => p.category === "Other Services").map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name} — ₹{p.price.toLocaleString("en-IN")} ({p.billing_unit})
+                      </option>
+                    ))}
+                  </optgroup>
+                </select>
+              </div>
+
               <div>
                 <label className="font-bold text-on-surface">Service Name *</label>
                 <input

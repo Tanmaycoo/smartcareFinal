@@ -20,36 +20,56 @@ import {
   Calendar,
   ShieldCheck,
   Receipt,
-  ArrowRight
+  ArrowRight,
+  BedDouble,
+  Edit,
+  Send,
+  Phone,
+  Tag,
+  Activity,
+  Check
 } from "lucide-react";
 import {
   getHospitalBillingMetrics,
   getHospitalBills,
   createPatientBill,
+  updateHospitalBill,
+  issueHospitalBill,
   getHospitalBillDetail,
   cancelHospitalBill,
   recordBillPayment,
   getHospitalServices,
+  getHospitalRequests,
+  subscribeToDataChanges,
   PatientBill,
   HospitalBillingMetrics,
   HospitalService,
+  PatientRequest,
   UserSession
 } from "@/lib/api";
 
 interface Props {
   session: UserSession | null;
+  hospitalId?: number;
+  allRequests?: PatientRequest[];
+  onRefreshRequests?: () => void;
 }
 
-export default function BillingManagementTab({ session }: Props) {
+export default function BillingManagementTab({ session, hospitalId, allRequests, onRefreshRequests }: Props) {
   const [metrics, setMetrics] = useState<HospitalBillingMetrics | null>(null);
   const [bills, setBills] = useState<PatientBill[]>([]);
   const [catalogueServices, setCatalogueServices] = useState<HospitalService[]>([]);
+  const [admittedPatients, setAdmittedPatients] = useState<PatientRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Sub-view switcher: "admitted" | "invoices"
+  const [activeSubView, setActiveSubView] = useState<"admitted" | "invoices">("admitted");
 
   // Filters
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [search, setSearch] = useState("");
+  const [patientSearch, setPatientSearch] = useState("");
 
   // Modals
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -68,6 +88,22 @@ export default function BillingManagementTab({ session }: Props) {
     ]
   });
 
+  // Edit Bill Modal State
+  const [editingBill, setEditingBill] = useState<PatientBill | null>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editBillForm, setEditBillForm] = useState({
+    patient_name: "",
+    patient_phone: "",
+    patient_email: "",
+    admission_date: "",
+    discharge_date: "",
+    due_date: "",
+    tax_amount: 0,
+    discount_amount: 0,
+    notes: "",
+    status: "ISSUED"
+  });
+
   // Record Payment Modal
   const [paymentBill, setPaymentBill] = useState<PatientBill | null>(null);
   const [paymentForm, setPaymentForm] = useState({
@@ -80,11 +116,30 @@ export default function BillingManagementTab({ session }: Props) {
   // Invoice Print View Modal
   const [selectedInvoice, setSelectedInvoice] = useState<PatientBill | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
+  const [actionLoadingId, setActionLoadingId] = useState<number | null>(null);
+  const [submittingBill, setSubmittingBill] = useState(false);
+
+  const toSafeISO = (val?: string) => {
+    if (!val || !val.trim()) return undefined;
+    const d = new Date(val);
+    return isNaN(d.getTime()) ? undefined : d.toISOString();
+  };
 
   useEffect(() => {
     loadBillingData();
     loadCatalogue();
-  }, [statusFilter]);
+    loadAdmittedPatients();
+
+    // Instant cross-tab sync when bills or payments mutate
+    const unsubscribe = subscribeToDataChanges((entity) => {
+      loadBillingData();
+      loadAdmittedPatients();
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [statusFilter, allRequests]);
 
   const loadBillingData = async () => {
     try {
@@ -115,6 +170,23 @@ export default function BillingManagementTab({ session }: Props) {
     }
   };
 
+  const loadAdmittedPatients = async () => {
+    try {
+      let reqs: PatientRequest[] = [];
+      if (allRequests && allRequests.length > 0) {
+        reqs = allRequests;
+      } else {
+        const hospId = hospitalId || session?.hospital_id || undefined;
+        reqs = await getHospitalRequests(undefined, hospId);
+      }
+      // Filter for admitted, bed-allocated, or recently completed in-patients
+      const admitted = reqs.filter((r) => r.status === "ADMITTED" || r.status === "BED_ALLOCATED" || r.status === "COMPLETED" || r.status === "DISCHARGED");
+      setAdmittedPatients(admitted);
+    } catch (err) {
+      console.error("Error loading admitted patients:", err);
+    }
+  };
+
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     loadBillingData();
@@ -135,7 +207,7 @@ export default function BillingManagementTab({ session }: Props) {
         }
       : {
           service_id: undefined,
-          service_name: "General Ward Admission",
+          service_name: "General Ward Bed Charges",
           category: "Room and Bed Charges",
           quantity: 1,
           unit_price: 1500,
@@ -155,6 +227,119 @@ export default function BillingManagementTab({ session }: Props) {
       items: [initialItem]
     });
     setShowCreateModal(true);
+  };
+
+  // Open Create Bill with Admitted Patient auto-populated
+  const openCreateBillForPatient = (patient: PatientRequest) => {
+    const admDate = patient.created_at ? new Date(patient.created_at).toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
+    const today = new Date().toISOString().split("T")[0];
+    const due = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+    // Try to match bed category in catalogue
+    let matchedService = catalogueServices.find((s) =>
+      patient.allocated_bed_category && s.name.toLowerCase().includes(patient.allocated_bed_category.toLowerCase().split(" ")[0])
+    );
+
+    const bedChargeItem = matchedService && matchedService.current_price
+      ? {
+          service_id: matchedService.id,
+          service_name: matchedService.name,
+          category: matchedService.category,
+          quantity: 1,
+          unit_price: matchedService.current_price.price,
+          notes: `Bed allocated: ${patient.allocated_bed_category}`
+        }
+      : {
+          service_id: undefined,
+          service_name: patient.allocated_bed_category ? `${patient.allocated_bed_category} Tariff` : "General In-Patient Ward Bed",
+          category: "Room and Bed Charges",
+          quantity: 1,
+          unit_price: patient.allocated_bed_category?.includes("ICU") ? 5000 : 1500,
+          notes: `Emergency admission bed: ${patient.allocated_bed_category || "General Ward"}`
+        };
+
+    setCreateBillForm({
+      patient_name: patient.patient_name,
+      patient_phone: patient.contact_phone,
+      patient_email: "",
+      admission_date: admDate,
+      discharge_date: today,
+      due_date: due,
+      tax_amount: 0,
+      discount_amount: 0,
+      notes: `In-patient clinical care for ${patient.emergency_type} case (Ticket: ${patient.ticket_code}). Allocated bed: ${patient.allocated_bed_category || "General Ward"}.`,
+      items: [
+        bedChargeItem,
+        {
+          service_id: undefined,
+          service_name: "Emergency Triage & Consultation",
+          category: "Emergency Services",
+          quantity: 1,
+          unit_price: 800,
+          notes: "Initial admission triage & medical officer evaluation"
+        }
+      ]
+    });
+    setShowCreateModal(true);
+  };
+
+  // Open Edit Bill Modal
+  const openEditModal = (bill: PatientBill) => {
+    setEditingBill(bill);
+    setEditBillForm({
+      patient_name: bill.patient_name || "",
+      patient_phone: bill.patient_phone || "",
+      patient_email: bill.patient_email || "",
+      admission_date: bill.admission_date ? new Date(bill.admission_date).toISOString().split("T")[0] : "",
+      discharge_date: bill.discharge_date ? new Date(bill.discharge_date).toISOString().split("T")[0] : "",
+      due_date: bill.due_date ? new Date(bill.due_date).toISOString().split("T")[0] : "",
+      tax_amount: bill.tax_amount || 0,
+      discount_amount: bill.discount_amount || 0,
+      notes: bill.notes || "",
+      status: bill.status || "ISSUED"
+    });
+    setShowEditModal(true);
+  };
+
+  const handleEditBillSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingBill) return;
+
+    try {
+      setActionLoadingId(editingBill.id);
+      await updateHospitalBill(editingBill.id, {
+        patient_name: editBillForm.patient_name.trim(),
+        patient_phone: editBillForm.patient_phone.trim() || undefined,
+        patient_email: editBillForm.patient_email.trim() || undefined,
+        admission_date: editBillForm.admission_date ? new Date(editBillForm.admission_date).toISOString() : undefined,
+        discharge_date: editBillForm.discharge_date ? new Date(editBillForm.discharge_date).toISOString() : undefined,
+        due_date: editBillForm.due_date ? new Date(editBillForm.due_date).toISOString() : undefined,
+        tax_amount: Number(editBillForm.tax_amount) || 0,
+        discount_amount: Number(editBillForm.discount_amount) || 0,
+        notes: editBillForm.notes.trim() || undefined,
+        status: editBillForm.status as any
+      });
+      setShowEditModal(false);
+      setEditingBill(null);
+      await loadBillingData();
+    } catch (err: any) {
+      alert(err.message || "Failed to update bill.");
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  // Issue Bill to Patient (Transition from DRAFT to ISSUED)
+  const handleIssueBill = async (billId: number) => {
+    try {
+      setActionLoadingId(billId);
+      await issueHospitalBill(billId);
+      await loadBillingData();
+    } catch (err: any) {
+      alert(err.message || "Failed to issue bill.");
+    } finally {
+      setActionLoadingId(null);
+    }
   };
 
   const handleAddItem = () => {
@@ -209,13 +394,14 @@ export default function BillingManagementTab({ session }: Props) {
     }
 
     try {
+      setSubmittingBill(true);
       await createPatientBill({
-        patient_name: createBillForm.patient_name,
-        patient_phone: createBillForm.patient_phone || undefined,
-        patient_email: createBillForm.patient_email || undefined,
-        admission_date: createBillForm.admission_date ? new Date(createBillForm.admission_date).toISOString() : undefined,
-        discharge_date: createBillForm.discharge_date ? new Date(createBillForm.discharge_date).toISOString() : undefined,
-        due_date: createBillForm.due_date ? new Date(createBillForm.due_date).toISOString() : undefined,
+        patient_name: createBillForm.patient_name.trim(),
+        patient_phone: createBillForm.patient_phone?.trim() || undefined,
+        patient_email: createBillForm.patient_email?.trim() || undefined,
+        admission_date: toSafeISO(createBillForm.admission_date),
+        discharge_date: toSafeISO(createBillForm.discharge_date),
+        due_date: toSafeISO(createBillForm.due_date),
         tax_amount: Number(createBillForm.tax_amount) || 0,
         discount_amount: Number(createBillForm.discount_amount) || 0,
         notes: createBillForm.notes || undefined,
@@ -230,9 +416,12 @@ export default function BillingManagementTab({ session }: Props) {
       });
 
       setShowCreateModal(false);
-      loadBillingData();
+      await loadBillingData();
+      if (onRefreshRequests) onRefreshRequests();
     } catch (err: any) {
       alert(err.message || "Failed to create patient bill.");
+    } finally {
+      setSubmittingBill(false);
     }
   };
 
@@ -306,13 +495,13 @@ export default function BillingManagementTab({ session }: Props) {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-surface-container-lowest p-6 rounded-2xl shadow-sm border border-outline-variant/30">
         <div>
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center font-bold">
+            <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary flex items-center justify-center font-bold">
               <CreditCard className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-on-surface tracking-tight">Patient Billing & Invoicing</h1>
+              <h1 className="text-xl font-bold text-on-surface tracking-tight">Patient Billing & In-Patient Invoicing</h1>
               <p className="text-xs text-on-surface-variant mt-0.5">
-                Generate itemized hospital bills from the catalogue, process payments, and issue printable GST invoices.
+                Manage admitted hospital patients, generate itemized bills, process multi-mode payments, and issue GST invoices.
               </p>
             </div>
           </div>
@@ -320,252 +509,600 @@ export default function BillingManagementTab({ session }: Props) {
 
         <div className="flex items-center gap-2.5">
           <button
+            onClick={() => {
+              setRefreshing(true);
+              loadBillingData();
+              loadAdmittedPatients();
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-outline-variant/50 hover:bg-surface-container text-on-surface-variant text-xs font-semibold transition-colors"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            <span>Refresh</span>
+          </button>
+
+          <button
             onClick={openCreateBill}
             className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-white text-xs font-bold shadow-sm hover:brightness-105 transition-all"
           >
             <Plus className="w-4 h-4" />
-            <span>Create Patient Bill</span>
+            <span>New Custom Bill</span>
           </button>
         </div>
       </div>
 
-      {/* Summary KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
-          <span className="text-xs font-bold text-outline uppercase tracking-wider">Total Billed</span>
-          <div className="mt-2">
-            <span className="text-2xl font-extrabold text-on-surface">
-              {formatINR(metrics?.total_billed)}
-            </span>
-            <div className="text-[11px] text-on-surface-variant font-medium mt-1">
-              Across {metrics?.total_bills ?? 0} invoices
-            </div>
-          </div>
-        </div>
-
-        <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
-          <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            Total Collected
-          </span>
-          <div className="mt-2">
-            <span className="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">
-              {formatINR(metrics?.total_collected)}
-            </span>
-            <div className="text-[11px] text-on-surface-variant font-medium mt-1">
-              {metrics?.paid_bills ?? 0} fully paid, {metrics?.partially_paid_bills ?? 0} partial
-            </div>
-          </div>
-        </div>
-
-        <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
-          <span className="text-xs font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
-            <AlertCircle className="w-3.5 h-3.5" />
-            Outstanding Balance
-          </span>
-          <div className="mt-2">
-            <span className="text-2xl font-extrabold text-amber-600 dark:text-amber-400">
-              {formatINR(metrics?.total_outstanding)}
-            </span>
-            <div className="text-[11px] text-on-surface-variant font-medium mt-1">
-              Pending patient settlement
-            </div>
-          </div>
-        </div>
-
-        <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
-          <span className="text-xs font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
-            <Clock className="w-3.5 h-3.5" />
-            Overdue Invoices
-          </span>
-          <div className="mt-2 flex items-baseline justify-between">
-            <span className="text-2xl font-extrabold text-rose-600 dark:text-rose-400">
-              {metrics?.overdue_bills ?? 0}
-            </span>
-            <span className="text-[11px] text-on-surface-variant font-medium">Past due date</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Filter & Search Bar */}
-      <div className="bg-surface-container-lowest p-4 rounded-xl shadow-sm border border-outline-variant/30 flex flex-col md:flex-row items-center justify-between gap-3">
-        <form onSubmit={handleSearchSubmit} className="flex-1 w-full relative">
-          <Search className="w-4 h-4 text-on-surface-variant absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search bill number, patient name, contact phone, email..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 rounded-xl border border-outline-variant/50 bg-surface text-xs text-on-surface focus:outline-none focus:border-primary"
-          />
-        </form>
-
-        <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-3 py-2 rounded-xl border border-outline-variant/50 bg-surface text-xs text-on-surface font-semibold focus:outline-none"
+      {/* Primary Sub-View Segmented Switcher */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-surface-container-low p-1.5 rounded-2xl border border-outline-variant/30">
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <button
+            type="button"
+            onClick={() => setActiveSubView("admitted")}
+            className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${
+              activeSubView === "admitted"
+                ? "bg-surface-container-lowest text-primary shadow-sm border border-outline-variant/30"
+                : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container"
+            }`}
           >
-            <option value="ALL">All Statuses</option>
-            <option value="ISSUED">Issued</option>
-            <option value="PARTIALLY_PAID">Partially Paid</option>
-            <option value="PAID">Paid</option>
-            <option value="OVERDUE">Overdue</option>
-            <option value="DRAFT">Draft</option>
-            <option value="CANCELLED">Cancelled</option>
-          </select>
+            <BedDouble className="w-4 h-4" />
+            <span>Admitted In-Patients Directory</span>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-primary/10 text-primary">
+              {admittedPatients.length}
+            </span>
+          </button>
 
           <button
-            onClick={() => {
-              setRefreshing(true);
-              loadBillingData();
-            }}
-            className="p-2 rounded-xl border border-outline-variant/50 hover:bg-surface-container text-on-surface-variant transition-colors"
-            title="Refresh"
+            type="button"
+            onClick={() => setActiveSubView("invoices")}
+            className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold transition-all ${
+              activeSubView === "invoices"
+                ? "bg-surface-container-lowest text-primary shadow-sm border border-outline-variant/30"
+                : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container"
+            }`}
           >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+            <Receipt className="w-4 h-4" />
+            <span>Invoices & Billing History</span>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-surface-container-high text-on-surface">
+              {bills.length}
+            </span>
           </button>
+        </div>
+
+        <div className="text-xs text-on-surface-variant px-3 font-medium hidden md:block">
+          {activeSubView === "admitted"
+            ? "Patients currently occupying allocated ward beds in this facility"
+            : "Complete billing audit trail and revenue settlements"}
         </div>
       </div>
 
-      {/* Bills Table */}
-      <div className="bg-surface-container-lowest rounded-2xl shadow-sm border border-outline-variant/30 overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-on-surface">
-            <thead className="bg-surface-container-low text-outline font-bold uppercase tracking-wider border-b border-outline-variant/30 text-[11px]">
-              <tr>
-                <th className="px-5 py-3.5">Bill # / Date</th>
-                <th className="px-5 py-3.5">Patient Details</th>
-                <th className="px-5 py-3.5 text-right">Total Amount</th>
-                <th className="px-5 py-3.5 text-right">Amount Paid</th>
-                <th className="px-5 py-3.5 text-right">Balance Due</th>
-                <th className="px-5 py-3.5">Status</th>
-                <th className="px-5 py-3.5 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-outline-variant/20">
-              {loading ? (
-                <tr>
-                  <td colSpan={7} className="px-5 py-12 text-center text-on-surface-variant">
-                    <div className="flex flex-col items-center gap-2">
-                      <RefreshCw className="w-5 h-5 animate-spin text-primary" />
-                      <span>Loading patient bills...</span>
-                    </div>
-                  </td>
-                </tr>
-              ) : bills.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-5 py-12 text-center text-on-surface-variant">
-                    <div className="flex flex-col items-center gap-2">
-                      <Receipt className="w-8 h-8 text-outline/50" />
-                      <span className="font-semibold text-sm text-on-surface">No billing records found</span>
-                      <span className="text-xs">
-                        Click "Create Patient Bill" to issue a new medical bill for an admitted or outpatient individual.
-                      </span>
-                    </div>
-                  </td>
-                </tr>
-              ) : (
-                bills.map((bill) => {
+      {/* ===================== VIEW A: ADMITTED PATIENTS DIRECTORY ===================== */}
+      {activeSubView === "admitted" && (
+        <div className="space-y-4 animate-fade-in">
+          {/* Admitted Patient Search & Filter */}
+          <div className="bg-surface-container-lowest p-4 rounded-xl shadow-sm border border-outline-variant/30 flex flex-col md:flex-row items-center justify-between gap-3">
+            <div className="relative flex-1 w-full">
+              <Search className="w-4 h-4 text-on-surface-variant absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search admitted patients by name, contact phone, ticket code, or bed category..."
+                value={patientSearch}
+                onChange={(e) => setPatientSearch(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 rounded-xl border border-outline-variant/50 bg-surface text-xs text-on-surface focus:outline-none focus:border-primary font-medium"
+              />
+            </div>
+            <div className="text-xs text-on-surface-variant font-semibold">
+              Showing {
+                admittedPatients.filter((p) => {
+                  if (!patientSearch.trim()) return true;
+                  const term = patientSearch.toLowerCase();
                   return (
-                    <tr key={bill.id} className="hover:bg-surface-container-low/60 transition-colors">
-                      <td className="px-5 py-3.5">
-                        <div className="font-bold text-sm font-mono text-primary">{bill.bill_number}</div>
-                        <div className="text-[11px] text-on-surface-variant">
-                          {new Date(bill.bill_date).toLocaleDateString("en-IN", {
-                            day: "2-digit",
-                            month: "short",
-                            year: "numeric"
-                          })}
-                        </div>
-                      </td>
+                    p.patient_name.toLowerCase().includes(term) ||
+                    p.contact_phone.includes(term) ||
+                    p.ticket_code.toLowerCase().includes(term) ||
+                    (p.allocated_bed_category && p.allocated_bed_category.toLowerCase().includes(term))
+                  );
+                }).length
+              } of {admittedPatients.length} admitted patients
+            </div>
+          </div>
 
-                      <td className="px-5 py-3.5">
-                        <div className="font-bold text-sm text-on-surface">{bill.patient_name}</div>
-                        <div className="text-[11px] font-mono text-on-surface-variant">
-                          {bill.patient_phone || "No phone"} • {bill.patient_email || "No email"}
-                        </div>
-                      </td>
-
-                      <td className="px-5 py-3.5 text-right font-bold text-sm text-on-surface">
-                        {formatINR(bill.total_amount)}
-                      </td>
-
-                      <td className="px-5 py-3.5 text-right font-semibold text-emerald-600 dark:text-emerald-400">
-                        {formatINR(bill.amount_paid)}
-                      </td>
-
-                      <td className="px-5 py-3.5 text-right font-bold text-sm text-on-surface">
-                        {bill.balance_due > 0 ? (
-                          <span className="text-amber-600 dark:text-amber-400">{formatINR(bill.balance_due)}</span>
-                        ) : (
-                          <span className="text-emerald-600 dark:text-emerald-400">₹0.00</span>
-                        )}
-                      </td>
-
-                      <td className="px-5 py-3.5">
-                        {bill.status === "PAID" ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-                            <CheckCircle2 className="w-3 h-3" />
-                            Paid
-                          </span>
-                        ) : bill.status === "PARTIALLY_PAID" ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">
-                            Partial
-                          </span>
-                        ) : bill.status === "OVERDUE" ? (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
-                            Overdue
-                          </span>
-                        ) : bill.status === "CANCELLED" ? (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-surface-container-high text-outline">
-                            Cancelled
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-primary/10 text-primary border border-primary/20">
-                            Issued
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="px-5 py-3.5 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
+          {/* Admitted In-Patients Table */}
+          <div className="bg-surface-container-lowest rounded-2xl shadow-sm border border-outline-variant/30 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs text-on-surface">
+                <thead className="bg-surface-container-low text-outline font-bold uppercase tracking-wider border-b border-outline-variant/30 text-[11px]">
+                  <tr>
+                    <th className="px-5 py-3.5">Patient Details</th>
+                    <th className="px-5 py-3.5">Allocated Bed / Ward</th>
+                    <th className="px-5 py-3.5">Condition & Severity</th>
+                    <th className="px-5 py-3.5">Admission Time & Ticket</th>
+                    <th className="px-5 py-3.5">Billing & Invoice Status</th>
+                    <th className="px-5 py-3.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-outline-variant/20">
+                  {admittedPatients.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-5 py-12 text-center text-on-surface-variant">
+                        <div className="flex flex-col items-center gap-2.5 max-w-md mx-auto">
+                          <BedDouble className="w-10 h-10 text-primary/40" />
+                          <span className="font-bold text-sm text-on-surface">No Admitted In-Patients At Present</span>
+                          <p className="text-xs text-on-surface-variant">
+                            When incoming emergency requests are admitted or allocated beds in the <strong>Triage & Bed Allocation</strong> queue, they automatically appear in this live directory.
+                          </p>
                           <button
-                            onClick={() => openInvoiceView(bill.id)}
-                            className="p-1.5 rounded-lg text-primary hover:bg-primary/10 transition-colors"
-                            title="View / Print Official Invoice"
+                            onClick={openCreateBill}
+                            className="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary text-white text-xs font-bold hover:brightness-105"
                           >
-                            <FileText className="w-4 h-4" />
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Create Outpatient Bill Manually</span>
                           </button>
-
-                          {bill.balance_due > 0 && bill.status !== "CANCELLED" && (
-                            <button
-                              onClick={() => openPaymentModal(bill)}
-                              className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-bold hover:brightness-105 transition-all shadow-xs"
-                            >
-                              Record Payment
-                            </button>
-                          )}
-
-                          {bill.amount_paid === 0 && bill.status !== "CANCELLED" && (
-                            <button
-                              onClick={() => handleCancelBill(bill.id)}
-                              className="p-1.5 rounded-lg text-outline hover:text-error hover:bg-error-container/20 transition-colors"
-                              title="Cancel Bill"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
                         </div>
                       </td>
                     </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+                  ) : (
+                    admittedPatients
+                      .filter((p) => {
+                        if (!patientSearch.trim()) return true;
+                        const term = patientSearch.toLowerCase();
+                        return (
+                          p.patient_name.toLowerCase().includes(term) ||
+                          p.contact_phone.includes(term) ||
+                          p.ticket_code.toLowerCase().includes(term) ||
+                          (p.allocated_bed_category && p.allocated_bed_category.toLowerCase().includes(term))
+                        );
+                      })
+                      .map((patient) => {
+                        // Find if a bill exists for this patient (prioritizing ticket code match)
+                        const cleanPatientPhone = patient.contact_phone ? patient.contact_phone.replace(/\D/g, "") : "";
+                        const matchedBill = bills.find((b) => {
+                          if (patient.ticket_code && b.notes && b.notes.includes(patient.ticket_code)) {
+                            return true;
+                          }
+                          const cleanBillPhone = b.patient_phone ? b.patient_phone.replace(/\D/g, "") : "";
+                          if (cleanPatientPhone.length >= 10 && cleanBillPhone.length >= 10 && cleanPatientPhone.slice(-10) === cleanBillPhone.slice(-10)) {
+                            return true;
+                          }
+                          if (b.patient_name && patient.patient_name && b.patient_name.trim().length >= 3) {
+                            return b.patient_name.toLowerCase().trim() === patient.patient_name.toLowerCase().trim();
+                          }
+                          return false;
+                        });
+
+                        return (
+                          <tr key={patient.id} className="hover:bg-surface-container-low/60 transition-colors">
+                            {/* Patient Info */}
+                            <td className="px-5 py-4">
+                              <div className="font-bold text-sm text-on-surface flex items-center gap-1.5">
+                                <span>{patient.patient_name}</span>
+                              </div>
+                              <div className="text-[11px] text-on-surface-variant mt-0.5">
+                                {patient.patient_age} yrs • {patient.patient_gender}
+                              </div>
+                              <div className="text-[11px] font-mono text-on-surface-variant flex items-center gap-1 mt-0.5">
+                                <Phone className="w-3 h-3 text-outline" />
+                                <span>{patient.contact_phone}</span>
+                              </div>
+                            </td>
+
+                            {/* Bed Allocated */}
+                            <td className="px-5 py-4">
+                              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-primary/10 border border-primary/20 text-primary font-bold text-xs">
+                                <BedDouble className="w-3.5 h-3.5" />
+                                <span>{patient.allocated_bed_category || "General In-Patient Bed"}</span>
+                              </div>
+                              <div className="text-[10px] text-on-surface-variant font-medium mt-1">
+                                Status:{" "}
+                                {patient.status === "COMPLETED" || patient.status === "DISCHARGED"
+                                  ? "Care Completed / Discharged"
+                                  : patient.status === "ADMITTED"
+                                  ? "In-Patient Admitted"
+                                  : "Bed Reserved & Allocated"}
+                              </div>
+                            </td>
+
+                            {/* Clinical Condition & Severity */}
+                            <td className="px-5 py-4">
+                              <div className="font-semibold text-xs text-on-surface">{patient.emergency_type}</div>
+                              <span
+                                className={`inline-block mt-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                                  patient.severity === "CRITICAL"
+                                    ? "bg-rose-500/10 text-rose-600 border border-rose-500/20"
+                                    : patient.severity === "URGENT"
+                                    ? "bg-amber-500/10 text-amber-600 border border-amber-500/20"
+                                    : "bg-surface-container-high text-on-surface-variant"
+                                }`}
+                              >
+                                {patient.severity}
+                              </span>
+                            </td>
+
+                            {/* Admission Time & Ticket */}
+                            <td className="px-5 py-4">
+                              <div className="font-mono font-bold text-xs text-primary">{patient.ticket_code}</div>
+                              <div className="text-[11px] text-on-surface-variant mt-0.5">
+                                {new Date(patient.created_at).toLocaleDateString("en-IN", {
+                                  day: "2-digit",
+                                  month: "short",
+                                  year: "numeric"
+                                })}
+                              </div>
+                              <div className="text-[10px] text-on-surface-variant">
+                                {new Date(patient.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                              </div>
+                            </td>
+
+                            {/* Billing & Invoice Status */}
+                            <td className="px-5 py-4">
+                              {matchedBill ? (
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-mono font-bold text-xs text-on-surface">{matchedBill.bill_number}</span>
+                                    <span
+                                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                        matchedBill.status === "PAID"
+                                          ? "bg-emerald-500/10 text-emerald-600 border border-emerald-500/20"
+                                          : matchedBill.status === "PARTIALLY_PAID"
+                                          ? "bg-cyan-500/10 text-cyan-600 border border-cyan-500/20"
+                                          : matchedBill.status === "DRAFT"
+                                          ? "bg-amber-500/10 text-amber-600 border border-amber-500/20"
+                                          : "bg-primary/10 text-primary border border-primary/20"
+                                      }`}
+                                    >
+                                      {matchedBill.status}
+                                    </span>
+                                  </div>
+                                  <div className="text-xs font-extrabold text-on-surface">
+                                    Total: {formatINR(matchedBill.total_amount)}
+                                  </div>
+                                  {matchedBill.balance_due > 0 ? (
+                                    <div className="text-[11px] text-amber-600 font-bold">
+                                      Due: {formatINR(matchedBill.balance_due)}
+                                    </div>
+                                  ) : (
+                                    <div className="text-[11px] text-emerald-600 font-bold flex items-center gap-1">
+                                      <CheckCircle2 className="w-3 h-3" /> Fully Settled
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <div>
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-surface-container-high text-on-surface-variant">
+                                    No Bill Generated
+                                  </span>
+                                  <div className="text-[10px] text-on-surface-variant mt-1">Ready for in-patient discharge invoice</div>
+                                </div>
+                              )}
+                            </td>
+
+                            {/* Actions */}
+                            <td className="px-5 py-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                {matchedBill ? (
+                                  <>
+                                    <button
+                                      onClick={() => openInvoiceView(matchedBill.id)}
+                                      className="p-1.5 rounded-lg text-primary hover:bg-primary/10 transition-colors"
+                                      title="View / Print Official Invoice"
+                                    >
+                                      <FileText className="w-4 h-4" />
+                                    </button>
+
+                                    <button
+                                      onClick={() => openEditModal(matchedBill)}
+                                      className="p-1.5 rounded-lg text-on-surface-variant hover:text-primary hover:bg-surface-container transition-colors"
+                                      title="Edit Bill Details & Amounts"
+                                    >
+                                      <Edit className="w-4 h-4" />
+                                    </button>
+
+                                    {matchedBill.status === "DRAFT" && (
+                                      <button
+                                        onClick={() => handleIssueBill(matchedBill.id)}
+                                        disabled={actionLoadingId === matchedBill.id}
+                                        className="px-2.5 py-1 rounded-lg bg-primary text-white text-[11px] font-bold hover:brightness-105 transition-all shadow-xs flex items-center gap-1"
+                                        title="Issue Bill to Patient"
+                                      >
+                                        <Send className="w-3 h-3" />
+                                        <span>Issue</span>
+                                      </button>
+                                    )}
+
+                                    {matchedBill.balance_due > 0 && matchedBill.status !== "CANCELLED" && (
+                                      <button
+                                        onClick={() => openPaymentModal(matchedBill)}
+                                        className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-bold hover:brightness-105 transition-all shadow-xs"
+                                      >
+                                        Record Pay
+                                      </button>
+                                    )}
+                                  </>
+                                ) : (
+                                  <button
+                                    onClick={() => openCreateBillForPatient(patient)}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-primary text-white text-xs font-bold hover:brightness-105 transition-all shadow-xs"
+                                  >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    <span>Generate Bill</span>
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* ===================== VIEW B: INVOICES & BILLING HISTORY ===================== */}
+      {activeSubView === "invoices" && (
+        <div className="space-y-6 animate-fade-in">
+          {/* Summary KPI Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
+              <span className="text-xs font-bold text-outline uppercase tracking-wider">Total Billed</span>
+              <div className="mt-2">
+                <span className="text-2xl font-extrabold text-on-surface">
+                  {formatINR(metrics?.total_billed)}
+                </span>
+                <div className="text-[11px] text-on-surface-variant font-medium mt-1">
+                  Across {metrics?.total_bills ?? 0} invoices
+                </div>
+              </div>
+            </div>
+
+            <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
+              <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                Total Collected
+              </span>
+              <div className="mt-2">
+                <span className="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">
+                  {formatINR(metrics?.total_collected)}
+                </span>
+                <div className="text-[11px] text-on-surface-variant font-medium mt-1">
+                  {metrics?.paid_bills ?? 0} fully paid, {metrics?.partially_paid_bills ?? 0} partial
+                </div>
+              </div>
+            </div>
+
+            <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
+              <span className="text-xs font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5" />
+                Outstanding Balance
+              </span>
+              <div className="mt-2">
+                <span className="text-2xl font-extrabold text-amber-600 dark:text-amber-400">
+                  {formatINR(metrics?.total_outstanding)}
+                </span>
+                <div className="text-[11px] text-on-surface-variant font-medium mt-1">
+                  Pending patient settlement
+                </div>
+              </div>
+            </div>
+
+            <div className="p-5 rounded-2xl bg-surface-container-lowest border border-outline-variant/30 shadow-sm flex flex-col justify-between">
+              <span className="text-xs font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5" />
+                Overdue Invoices
+              </span>
+              <div className="mt-2 flex items-baseline justify-between">
+                <span className="text-2xl font-extrabold text-rose-600 dark:text-rose-400">
+                  {metrics?.overdue_bills ?? 0}
+                </span>
+                <span className="text-[11px] text-on-surface-variant font-medium">Past due date</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Filter & Search Bar */}
+          <div className="bg-surface-container-lowest p-4 rounded-xl shadow-sm border border-outline-variant/30 flex flex-col md:flex-row items-center justify-between gap-3">
+            <form onSubmit={handleSearchSubmit} className="flex-1 w-full relative">
+              <Search className="w-4 h-4 text-on-surface-variant absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search bill number, patient name, contact phone, email..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 rounded-xl border border-outline-variant/50 bg-surface text-xs text-on-surface focus:outline-none focus:border-primary font-medium"
+              />
+            </form>
+
+            <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto">
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl border border-outline-variant/50 bg-surface text-xs text-on-surface font-semibold focus:outline-none"
+              >
+                <option value="ALL">All Statuses</option>
+                <option value="ISSUED">Issued</option>
+                <option value="PARTIALLY_PAID">Partially Paid</option>
+                <option value="PAID">Paid</option>
+                <option value="OVERDUE">Overdue</option>
+                <option value="DRAFT">Draft</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+
+              <button
+                onClick={() => {
+                  setRefreshing(true);
+                  loadBillingData();
+                }}
+                className="p-2 rounded-xl border border-outline-variant/50 hover:bg-surface-container text-on-surface-variant transition-colors"
+                title="Refresh"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+              </button>
+            </div>
+          </div>
+
+          {/* Bills Table */}
+          <div className="bg-surface-container-lowest rounded-2xl shadow-sm border border-outline-variant/30 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs text-on-surface">
+                <thead className="bg-surface-container-low text-outline font-bold uppercase tracking-wider border-b border-outline-variant/30 text-[11px]">
+                  <tr>
+                    <th className="px-5 py-3.5">Bill # / Date</th>
+                    <th className="px-5 py-3.5">Patient Details</th>
+                    <th className="px-5 py-3.5 text-right">Total Amount</th>
+                    <th className="px-5 py-3.5 text-right">Amount Paid</th>
+                    <th className="px-5 py-3.5 text-right">Balance Due</th>
+                    <th className="px-5 py-3.5">Status</th>
+                    <th className="px-5 py-3.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-outline-variant/20">
+                  {loading ? (
+                    <tr>
+                      <td colSpan={7} className="px-5 py-12 text-center text-on-surface-variant">
+                        <div className="flex flex-col items-center gap-2">
+                          <RefreshCw className="w-5 h-5 animate-spin text-primary" />
+                          <span>Loading patient bills...</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : bills.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-5 py-12 text-center text-on-surface-variant">
+                        <div className="flex flex-col items-center gap-2">
+                          <Receipt className="w-8 h-8 text-outline/50" />
+                          <span className="font-semibold text-sm text-on-surface">No billing records found</span>
+                          <span className="text-xs">
+                            Click "New Custom Bill" or select an admitted patient to issue a new medical bill.
+                          </span>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    bills.map((bill) => {
+                      return (
+                        <tr key={bill.id} className="hover:bg-surface-container-low/60 transition-colors">
+                          <td className="px-5 py-3.5">
+                            <div className="font-bold text-sm font-mono text-primary">{bill.bill_number}</div>
+                            <div className="text-[11px] text-on-surface-variant">
+                              {new Date(bill.bill_date).toLocaleDateString("en-IN", {
+                                day: "2-digit",
+                                month: "short",
+                                year: "numeric"
+                              })}
+                            </div>
+                          </td>
+
+                          <td className="px-5 py-3.5">
+                            <div className="font-bold text-sm text-on-surface">{bill.patient_name}</div>
+                            <div className="text-[11px] font-mono text-on-surface-variant">
+                              {bill.patient_phone || "No phone"} {bill.patient_email ? `• ${bill.patient_email}` : ""}
+                            </div>
+                          </td>
+
+                          <td className="px-5 py-3.5 text-right font-bold text-sm text-on-surface">
+                            {formatINR(bill.total_amount)}
+                          </td>
+
+                          <td className="px-5 py-3.5 text-right font-semibold text-emerald-600 dark:text-emerald-400">
+                            {formatINR(bill.amount_paid)}
+                          </td>
+
+                          <td className="px-5 py-3.5 text-right font-bold text-sm text-on-surface">
+                            {bill.balance_due > 0 ? (
+                              <span className="text-amber-600 dark:text-amber-400">{formatINR(bill.balance_due)}</span>
+                            ) : (
+                              <span className="text-emerald-600 dark:text-emerald-400">₹0.00</span>
+                            )}
+                          </td>
+
+                          <td className="px-5 py-3.5">
+                            {bill.status === "PAID" ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                                <CheckCircle2 className="w-3 h-3" />
+                                Paid
+                              </span>
+                            ) : bill.status === "PARTIALLY_PAID" ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border border-cyan-500/20">
+                                Partial
+                              </span>
+                            ) : bill.status === "OVERDUE" ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
+                                Overdue
+                              </span>
+                            ) : bill.status === "DRAFT" ? (
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                                Draft
+                              </span>
+                            ) : bill.status === "CANCELLED" ? (
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-surface-container-high text-outline">
+                                Cancelled
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-primary/10 text-primary border border-primary/20">
+                                Issued
+                              </span>
+                            )}
+                          </td>
+
+                          <td className="px-5 py-3.5 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => openInvoiceView(bill.id)}
+                                className="p-1.5 rounded-lg text-primary hover:bg-primary/10 transition-colors"
+                                title="View / Print Official Invoice"
+                              >
+                                <FileText className="w-4 h-4" />
+                              </button>
+
+                              <button
+                                onClick={() => openEditModal(bill)}
+                                className="p-1.5 rounded-lg text-on-surface-variant hover:text-primary hover:bg-surface-container transition-colors"
+                                title="Edit Bill"
+                              >
+                                <Edit className="w-4 h-4" />
+                              </button>
+
+                              {bill.status === "DRAFT" && (
+                                <button
+                                  onClick={() => handleIssueBill(bill.id)}
+                                  disabled={actionLoadingId === bill.id}
+                                  className="px-2.5 py-1 rounded-lg bg-primary text-white text-[11px] font-bold hover:brightness-105 transition-all shadow-xs flex items-center gap-1"
+                                  title="Issue Bill to Patient"
+                                >
+                                  <Send className="w-3 h-3" />
+                                  <span>Issue</span>
+                                </button>
+                              )}
+
+                              {bill.balance_due > 0 && bill.status !== "CANCELLED" && (
+                                <button
+                                  onClick={() => openPaymentModal(bill)}
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-bold hover:brightness-105 transition-all shadow-xs"
+                                >
+                                  Record Payment
+                                </button>
+                              )}
+
+                              {bill.amount_paid === 0 && bill.status !== "CANCELLED" && (
+                                <button
+                                  onClick={() => handleCancelBill(bill.id)}
+                                  className="p-1.5 rounded-lg text-outline hover:text-error hover:bg-error-container/20 transition-colors"
+                                  title="Cancel / Delete Bill"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===================== MODAL: CREATE PATIENT BILL ===================== */}
       {showCreateModal && (
@@ -826,9 +1363,216 @@ export default function BillingManagementTab({ session }: Props) {
               </button>
               <button
                 type="submit"
-                className="px-6 py-2 rounded-xl bg-primary hover:bg-primary-container text-white text-xs font-bold shadow-sm"
+                disabled={submittingBill}
+                className="px-6 py-2 rounded-xl bg-primary hover:bg-primary-container text-white text-xs font-bold shadow-sm disabled:opacity-50 inline-flex items-center gap-1.5"
               >
-                Issue Official Bill
+                {submittingBill && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{submittingBill ? "Generating..." : "Issue Official Bill"}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* ===================== MODAL: EDIT PATIENT BILL ===================== */}
+      {showEditModal && editingBill && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <form
+            onSubmit={handleEditBillSubmit}
+            className="bg-surface-container-lowest rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-outline-variant/40 space-y-4 animate-fade-in max-h-[90vh] flex flex-col"
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-outline-variant/30">
+              <div className="flex items-center gap-2">
+                <Edit className="w-5 h-5 text-primary" />
+                <div>
+                  <h3 className="font-bold text-base text-on-surface">Edit Bill — {editingBill.bill_number}</h3>
+                  <p className="text-[11px] text-on-surface-variant">Update patient credentials, stay dates, tax, discounts or status</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEditModal(false);
+                  setEditingBill(null);
+                }}
+                className="p-1 rounded-lg hover:bg-surface-container"
+              >
+                <X className="w-5 h-5 text-on-surface-variant" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-4 pr-1 text-xs">
+              <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="font-bold text-on-surface">Patient Name *</label>
+                    <input
+                      type="text"
+                      value={editBillForm.patient_name}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, patient_name: e.target.value })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface font-semibold"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-bold text-on-surface">Contact Phone</label>
+                    <input
+                      type="text"
+                      value={editBillForm.patient_phone}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, patient_phone: e.target.value })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-bold text-on-surface">Patient Email</label>
+                    <input
+                      type="email"
+                      value={editBillForm.patient_email}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, patient_email: e.target.value })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+                  <div>
+                    <label className="font-bold text-on-surface">Admission Date</label>
+                    <input
+                      type="date"
+                      value={editBillForm.admission_date}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, admission_date: e.target.value })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-bold text-on-surface">Discharge Date</label>
+                    <input
+                      type="date"
+                      value={editBillForm.discharge_date}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, discharge_date: e.target.value })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-bold text-on-surface">Payment Due Date</label>
+                    <input
+                      type="date"
+                      value={editBillForm.due_date}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, due_date: e.target.value })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Financial Adjustments */}
+              <div className="p-4 rounded-xl bg-surface-container-low border border-outline-variant/30 space-y-3">
+                <div className="font-bold text-xs uppercase tracking-wider text-outline">Financial Adjustments</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="font-bold text-on-surface">Subtotal</label>
+                    <div className="text-base font-extrabold text-on-surface mt-1">
+                      {formatINR(editingBill.subtotal)}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between items-center">
+                      <label className="font-bold text-on-surface">GST / Taxes (₹)</label>
+                      <button
+                        type="button"
+                        onClick={() => setEditBillForm({
+                          ...editBillForm,
+                          tax_amount: Math.round((editingBill.subtotal || 0) * 0.18)
+                        })}
+                        className="text-[10px] text-primary hover:underline font-bold"
+                      >
+                        Set 18% GST
+                      </button>
+                    </div>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={editBillForm.tax_amount}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, tax_amount: parseFloat(e.target.value) || 0 })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface font-semibold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="font-bold text-on-surface">Concession / Discount (₹)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={editBillForm.discount_amount}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, discount_amount: parseFloat(e.target.value) || 0 })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface font-semibold"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  <div>
+                    <label className="font-bold text-on-surface">Invoice Status</label>
+                    <select
+                      value={editBillForm.status}
+                      onChange={(e) => setEditBillForm({ ...editBillForm, status: e.target.value })}
+                      className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface font-semibold"
+                    >
+                      <option value="DRAFT">Draft</option>
+                      <option value="ISSUED">Issued</option>
+                      <option value="PARTIALLY_PAID">Partially Paid</option>
+                      <option value="PAID">Paid</option>
+                      <option value="OVERDUE">Overdue</option>
+                      <option value="CANCELLED">Cancelled</option>
+                    </select>
+                  </div>
+
+                  <div className="flex flex-col justify-end">
+                    <span className="text-[11px] text-on-surface-variant">Computed Total Estimate:</span>
+                    <span className="text-base font-extrabold text-primary">
+                      {formatINR(
+                        Math.max(0, (editingBill.subtotal || 0) + (Number(editBillForm.tax_amount) || 0) - (Number(editBillForm.discount_amount) || 0))
+                      )}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <label className="font-bold text-on-surface">Invoice Notes</label>
+                <textarea
+                  rows={2}
+                  value={editBillForm.notes}
+                  onChange={(e) => setEditBillForm({ ...editBillForm, notes: e.target.value })}
+                  className="w-full mt-1 p-2 rounded-lg border border-outline-variant/50 text-xs bg-surface"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-3 border-t border-outline-variant/30">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowEditModal(false);
+                  setEditingBill(null);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-on-surface-variant hover:bg-surface-container"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={actionLoadingId === editingBill.id}
+                className="px-5 py-2 rounded-xl bg-primary hover:bg-primary-container text-white text-xs font-bold shadow-sm"
+              >
+                {actionLoadingId === editingBill.id ? "Saving..." : "Save Bill Changes"}
               </button>
             </div>
           </form>
@@ -859,9 +1603,18 @@ export default function BillingManagementTab({ session }: Props) {
             <div className="p-3.5 rounded-xl bg-surface-container-low text-xs space-y-1">
               <div className="font-bold text-sm text-on-surface">{paymentBill.patient_name}</div>
               <div className="font-mono text-primary font-bold">{paymentBill.bill_number}</div>
-              <div className="flex justify-between pt-1">
+              <div className="flex justify-between items-center pt-1">
                 <span className="text-on-surface-variant">Outstanding Balance:</span>
-                <span className="font-extrabold text-amber-600 text-sm">{formatINR(paymentBill.balance_due)}</span>
+                <div className="flex items-center gap-2">
+                  <span className="font-extrabold text-amber-600 text-sm">{formatINR(paymentBill.balance_due)}</span>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentForm({ ...paymentForm, amount: paymentBill.balance_due })}
+                    className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 font-bold text-[10px] border border-emerald-500/20 hover:bg-emerald-500/20"
+                  >
+                    Pay Full
+                  </button>
+                </div>
               </div>
             </div>
 

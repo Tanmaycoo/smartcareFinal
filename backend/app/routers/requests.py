@@ -1,6 +1,7 @@
 import random
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app import models, schemas, auth
@@ -56,7 +57,10 @@ def create_patient_emergency_request(
 
 @router.get("/patient/requests/track/{ticket_code}", response_model=schemas.PatientRequestOut)
 def track_patient_request(ticket_code: str, db: Session = Depends(get_db)):
-    req = db.query(models.PatientRequest).filter(models.PatientRequest.ticket_code == ticket_code).first()
+    code_normalized = ticket_code.strip()
+    req = db.query(models.PatientRequest).filter(
+        func.upper(models.PatientRequest.ticket_code) == code_normalized.upper()
+    ).first()
     if not req:
         raise HTTPException(status_code=404, detail="Emergency request ticket not found")
 
@@ -118,15 +122,60 @@ def update_patient_request_status(
     if payload.notes:
         req.notes = payload.notes
 
-    # If admitted or bed allocated, optionally decrement bed count
-    if payload.status == "BED_ALLOCATED" and payload.allocated_bed_category:
-        bed = db.query(models.BedCategory).filter(
-            models.BedCategory.hospital_id == req.requested_hospital_id,
-            models.BedCategory.category == payload.allocated_bed_category
-        ).first()
-        if bed and bed.available_beds > 0:
-            bed.available_beds -= 1
-            bed.occupied_beds += 1
+    # Intelligent bed count decrement / release logic
+    allocating_statuses = ["BED_ALLOCATED", "ADMITTED"]
+    was_already_allocated = old_status in allocating_statuses
+    is_now_allocated = req.status in allocating_statuses
+
+    target_category = req.allocated_bed_category or payload.allocated_bed_category
+
+    if is_now_allocated and not was_already_allocated:
+        h_beds = db.query(models.BedCategory).filter(
+            models.BedCategory.hospital_id == req.requested_hospital_id
+        ).all()
+        
+        target_bed = None
+        if target_category:
+            # 1. Exact match
+            for b in h_beds:
+                if b.category.strip().lower() == target_category.strip().lower():
+                    target_bed = b
+                    break
+            # 2. Substring match
+            if not target_bed:
+                for b in h_beds:
+                    if b.category.strip().lower() in target_category.strip().lower() or target_category.strip().lower() in b.category.strip().lower():
+                        target_bed = b
+                        break
+        # 3. Fallback to first bed with availability
+        if not target_bed:
+            for b in h_beds:
+                if b.available_beds > 0:
+                    target_bed = b
+                    break
+                    
+        if target_bed and target_bed.available_beds > 0:
+            target_bed.available_beds -= 1
+            target_bed.occupied_beds = (target_bed.occupied_beds or 0) + 1
+            req.allocated_bed_category = target_bed.category
+
+    # If transitioning out of allocated status (CANCELLED, DIVERTED, DISCHARGED, REJECTED), release the bed
+    elif was_already_allocated and req.status in ["CANCELLED", "DIVERTED", "DISCHARGED", "REJECTED"]:
+        cat_to_release = old_bed_cat or req.allocated_bed_category
+        h_beds = db.query(models.BedCategory).filter(
+            models.BedCategory.hospital_id == req.requested_hospital_id
+        ).all()
+        target_bed = None
+        if cat_to_release:
+            for b in h_beds:
+                if b.category.strip().lower() in cat_to_release.strip().lower() or cat_to_release.strip().lower() in b.category.strip().lower():
+                    target_bed = b
+                    break
+        if not target_bed and h_beds:
+            target_bed = h_beds[0]
+        if target_bed:
+            target_bed.available_beds = min(target_bed.total_beds, target_bed.available_beds + 1)
+            target_bed.occupied_beds = max(0, (target_bed.occupied_beds or 1) - 1)
 
     db.add(models.AuditLog(
         actor_email=current_user.email,

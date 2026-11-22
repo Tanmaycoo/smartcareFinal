@@ -30,6 +30,7 @@ import {
   getHospitalDetail,
   createEmergencyRequest,
   trackEmergencyRequest,
+  subscribeToDataChanges,
   Hospital,
   PatientRequest
 } from "@/lib/api";
@@ -77,9 +78,9 @@ export default function PatientHomePage() {
   const [detailLoading, setDetailLoading] = useState(false);
 
   // Fetch Hospitals
-  const loadHospitals = async () => {
+  const loadHospitals = async (silent: boolean = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const params: any = {};
       if (searchQuery.trim()) params.q = searchQuery.trim();
       if (selectedCity !== "All") params.city = selectedCity;
@@ -101,14 +102,35 @@ export default function PatientHomePage() {
         }));
       }
     } catch (err: any) {
-      setError(err.message || "Failed to load network hospitals.");
+      if (!silent) setError(err.message || "Failed to load network hospitals.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   useEffect(() => {
     loadHospitals();
+
+    // 1. Instant cross-tab real-time sync when hospital updates beds/resources/requests
+    const unsubscribe = subscribeToDataChanges(() => {
+      loadHospitals(true);
+      if (ticketInput.trim()) {
+        trackEmergencyRequest(ticketInput.trim()).then(setTrackedRequest).catch(() => {});
+      }
+    });
+
+    // 2. Background polling fallback every 4 seconds for ultra-responsive live bed availability & ticket status
+    const interval = setInterval(() => {
+      loadHospitals(true);
+      if (ticketInput.trim()) {
+        trackEmergencyRequest(ticketInput.trim()).then(setTrackedRequest).catch(() => {});
+      }
+    }, 4000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
   }, [selectedCity, selectedBedType, userCoords, radiusKm]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -129,12 +151,12 @@ export default function PatientHomePage() {
           lat: pos.coords.latitude,
           lng: pos.coords.longitude,
         });
-        setRadiusKm(25);
+        setRadiusKm(undefined);
         setGeoLoading(false);
       },
       () => {
         setUserCoords({ lat: 18.5204, lng: 73.8567 });
-        setRadiusKm(25);
+        setRadiusKm(undefined);
         setGeoLoading(false);
       }
     );
@@ -742,6 +764,19 @@ export default function PatientHomePage() {
             <Building className="w-10 h-10 text-on-surface-variant mx-auto opacity-50" />
             <p className="text-sm font-bold text-on-surface">No hospitals match your search filters.</p>
             <p className="text-xs text-on-surface-variant">Try expanding your radius or selecting "All Cities".</p>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedCity("All");
+                setSelectedBedType("All");
+                setRadiusKm(undefined);
+                setSearchQuery("");
+                loadHospitals();
+              }}
+              className="mt-3 px-4 py-2 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-bold shadow-sm transition-all inline-flex items-center gap-1.5"
+            >
+              Reset Filters & Show All Facilities
+            </button>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

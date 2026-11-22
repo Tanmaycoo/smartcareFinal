@@ -194,8 +194,12 @@ class _BloodDonationScreenState extends State<BloodDonationScreen>
                             description: prov.selectedBloodGroup != 'All'
                                 ? 'No blood banks currently have stock for ${prov.selectedBloodGroup}.'
                                 : 'No active blood banks detected nearby.',
-                            buttonText: 'View All Groups',
-                            onRetry: () => prov.setSelectedBloodGroup('All'),
+                            buttonText: 'Show All Blood Banks',
+                            onRetry: () {
+                              prov.setSelectedBloodGroup('All');
+                              prov.setRadius(null);
+                              prov.fetchBloodBanks();
+                            },
                           )
                         : ListView.separated(
                             padding: const EdgeInsets.all(16),

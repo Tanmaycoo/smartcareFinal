@@ -143,6 +143,35 @@ class HospitalAdminProvider extends ChangeNotifier {
       if (idx != -1) {
         _incomingRequests[idx] = updated;
       }
+
+      // Optimistically decrement matching bed category on allocate or admit
+      if (status == 'BED_ALLOCATED' || status == 'ADMITTED') {
+        final targetCat = bedCategory ?? updated.allocatedBedCategory;
+        if (targetCat != null && _beds.isNotEmpty) {
+          final bedIdx = _beds.indexWhere((b) =>
+              b.category.toLowerCase().contains(targetCat.toLowerCase()) ||
+              targetCat.toLowerCase().contains(b.category.toLowerCase()));
+          if (bedIdx != -1 && _beds[bedIdx].availableBeds > 0) {
+            final targetBed = _beds[bedIdx];
+            _beds[bedIdx] = BedCategoryModel(
+              id: targetBed.id,
+              hospitalId: targetBed.hospitalId,
+              category: targetBed.category,
+              totalBeds: targetBed.totalBeds,
+              availableBeds: targetBed.availableBeds - 1,
+              occupiedBeds: targetBed.occupiedBeds + 1,
+              pricePerDay: targetBed.pricePerDay,
+            );
+          }
+        }
+        if (_hospital != null) {
+          _repo.getHospitalBeds(_hospital!.id).then((freshBeds) {
+            _beds = freshBeds;
+            notifyListeners();
+          }).catchError((_) {});
+        }
+      }
+
       notifyListeners();
       return true;
     } catch (e) {

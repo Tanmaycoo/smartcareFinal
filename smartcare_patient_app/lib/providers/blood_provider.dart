@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../core/config/app_config.dart';
 import '../data/models/blood_bank_model.dart';
@@ -6,8 +7,21 @@ import '../data/repositories/blood_repository.dart';
 
 class BloodProvider with ChangeNotifier {
   final BloodRepository _bloodRepository;
+  Timer? _telemetryTimer;
 
-  BloodProvider(this._bloodRepository);
+  BloodProvider(this._bloodRepository) {
+    fetchAll();
+    // Live background polling every 10 seconds
+    _telemetryTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      fetchBloodBanks(silent: true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _telemetryTimer?.cancel();
+    super.dispose();
+  }
 
   List<BloodBank> _bloodBanks = [];
   List<BloodDonor> _donors = [];
@@ -20,7 +34,7 @@ class BloodProvider with ChangeNotifier {
   String _selectedBloodGroup = 'All';
   double _userLat = AppConfig.defaultLatitude;
   double _userLng = AppConfig.defaultLongitude;
-  double? _radiusKm = 25.0;
+  double? _radiusKm; // defaults to null (Any Distance / All Regions)
 
   // Getters
   List<BloodBank> get bloodBanks => _bloodBanks;
@@ -58,23 +72,26 @@ class BloodProvider with ChangeNotifier {
     ]);
   }
 
-  Future<void> fetchBloodBanks() async {
-    _loadingBanks = true;
-    _bankError = null;
-    notifyListeners();
+  Future<void> fetchBloodBanks({bool silent = false}) async {
+    if (!silent) {
+      _loadingBanks = true;
+      _bankError = null;
+      notifyListeners();
+    }
 
     try {
-      _bloodBanks = await _bloodRepository.fetchNearbyBloodBanks(
+      final results = await _bloodRepository.fetchNearbyBloodBanks(
         lat: _userLat,
         lng: _userLng,
         bloodGroup: _selectedBloodGroup == 'All' ? null : _selectedBloodGroup,
         radiusKm: _radiusKm,
       );
+      _bloodBanks = results;
+      _bankError = null;
     } catch (e) {
       _bankError = e.toString().replaceFirst('Exception: ', '');
-      _bloodBanks = [];
     } finally {
-      _loadingBanks = false;
+      if (!silent) _loadingBanks = false;
       notifyListeners();
     }
   }

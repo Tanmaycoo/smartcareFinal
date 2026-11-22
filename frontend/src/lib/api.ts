@@ -7,6 +7,13 @@ export function getApiBaseUrl(): string {
   return 'https://smartcarefinal.onrender.com';
 }
 
+// Background keep-alive warm ping to prevent Render cold starts
+if (typeof window !== "undefined") {
+  setInterval(() => {
+    fetch(`${getApiBaseUrl()}/api/health`, { cache: "no-store" }).catch(() => {});
+  }, 4 * 60 * 1000);
+}
+
 export interface UserSession {
   access_token: string;
   token_type: string;
@@ -86,7 +93,7 @@ export interface PatientRequest {
   requested_hospital_id: number;
   hospital_name?: string;
   allocated_bed_category?: string;
-  status: "PENDING" | "TRIAGED" | "BED_ALLOCATED" | "DIVERTED" | "ADMITTED" | "CANCELLED";
+  status: "PENDING" | "TRIAGED" | "BED_ALLOCATED" | "DIVERTED" | "ADMITTED" | "CANCELLED" | "COMPLETED" | "DISCHARGED" | "REJECTED";
   eta_minutes: number;
   created_at: string;
   updated_at: string;
@@ -159,33 +166,142 @@ export function clearSession() {
   }
 }
 
-function getAuthHeaders(): HeadersInit {
+function getAuthHeaders(): Record<string, string> {
   const session = getStoredSession();
-  const headers: HeadersInit = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (session?.access_token) {
     headers["Authorization"] = `Bearer ${session.access_token}`;
   }
   return headers;
 }
 
+// Real-time synchronization bus across tabs, windows, and intra-page components
+let sharedBroadcastChannel: BroadcastChannel | null = null;
+function getSharedBroadcast(): BroadcastChannel | null {
+  if (typeof window === "undefined" || !("BroadcastChannel" in window)) return null;
+  if (!sharedBroadcastChannel) {
+    try {
+      sharedBroadcastChannel = new BroadcastChannel("smartcare_channel");
+    } catch {
+      sharedBroadcastChannel = null;
+    }
+  }
+  return sharedBroadcastChannel;
+}
+
+export function broadcastDataChange(entity: string) {
+  if (typeof window === "undefined") return;
+  try {
+    const payload = JSON.stringify({ entity, timestamp: Date.now() });
+    localStorage.setItem("smartcare_realtime_sync", payload);
+    
+    // Intra-window event (same tab)
+    window.dispatchEvent(new CustomEvent("smartcare_realtime_event", { detail: { entity } }));
+
+    // Inter-tab / Inter-window event
+    const ch = getSharedBroadcast();
+    if (ch) {
+      ch.postMessage({ entity, timestamp: Date.now() });
+    }
+  } catch {}
+}
+
+export function subscribeToDataChanges(callback: (entity: string) => void): () => void {
+  if (typeof window === "undefined") return () => {};
+
+  // 1. Cross-tab storage listener
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === "smartcare_realtime_sync" && e.newValue) {
+      try {
+        const parsed = JSON.parse(e.newValue);
+        callback(parsed.entity || "general");
+      } catch {}
+    }
+  };
+
+  // 2. Intra-tab custom event listener
+  const handleCustomEvent = (e: Event) => {
+    const custom = e as CustomEvent;
+    if (custom.detail?.entity) {
+      callback(custom.detail.entity);
+    }
+  };
+
+  // 3. BroadcastChannel listener
+  const handleBroadcast = (event: MessageEvent) => {
+    if (event.data?.entity) {
+      callback(event.data.entity);
+    }
+  };
+
+  window.addEventListener("storage", handleStorage);
+  window.addEventListener("smartcare_realtime_event", handleCustomEvent);
+
+  const ch = getSharedBroadcast();
+  if (ch) {
+    ch.addEventListener("message", handleBroadcast);
+  }
+
+  return () => {
+    window.removeEventListener("storage", handleStorage);
+    window.removeEventListener("smartcare_realtime_event", handleCustomEvent);
+    if (ch) {
+      ch.removeEventListener("message", handleBroadcast);
+    }
+  };
+}
+
 // API methods
 export async function apiFetch<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const url = `${getApiBaseUrl()}/api${endpoint}`;
+  const method = (options.method || "GET").toUpperCase();
+
+  // Prevent browser & proxy stale caching for GET queries by appending timestamp
+  let finalEndpoint = endpoint;
+  if (method === "GET") {
+    const sep = finalEndpoint.includes("?") ? "&" : "?";
+    finalEndpoint = `${finalEndpoint}${sep}_t=${Date.now()}`;
+  }
+
+  const url = `${getApiBaseUrl()}/api${finalEndpoint}`;
+
+  const defaultHeaders: Record<string, string> = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
+    ...getAuthHeaders(),
+  };
+
+  if (options.body && !(options.body instanceof FormData)) {
+    defaultHeaders["Content-Type"] = "application/json";
+  }
+
   const response = await fetch(url, {
     ...options,
+    cache: "no-store",
     headers: {
-      ...getAuthHeaders(),
+      ...defaultHeaders,
       ...(options.headers || {}),
     },
   });
 
   if (!response.ok) {
-    let errorDetail = "API Request Failed";
+    let errorDetail = `API Request Failed (${response.status})`;
     try {
       const errJson = await response.json();
-      errorDetail = errJson.detail || errorDetail;
+      if (typeof errJson.detail === "string") {
+        errorDetail = errJson.detail;
+      } else if (Array.isArray(errJson.detail)) {
+        errorDetail = errJson.detail.map((e: any) => e.msg || e.message || JSON.stringify(e)).join(", ");
+      } else if (errJson.message) {
+        errorDetail = errJson.message;
+      }
     } catch {}
     throw new Error(errorDetail);
+  }
+
+  // Trigger real-time cross-page sync broadcast for mutations
+  if (method !== "GET") {
+    broadcastDataChange(endpoint);
   }
 
   return response.json();

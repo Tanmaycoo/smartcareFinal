@@ -8,6 +8,7 @@ import '../../../providers/request_provider.dart';
 import '../../widgets/clinical_header.dart';
 import '../../widgets/empty_error_view.dart';
 import '../details/hospital_details_screen.dart';
+import '../billing/my_bills_screen.dart';
 
 class TicketTrackingScreen extends StatefulWidget {
   final VoidCallback? onProfileTap;
@@ -27,6 +28,13 @@ class _TicketTrackingScreenState extends State<TicketTrackingScreen>
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 2, vsync: this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final reqProv = context.read<RequestProvider>();
+      if (reqProv.trackedTicket != null) {
+        _codeCtrl.text = reqProv.trackedTicket!.ticketCode;
+        reqProv.startLiveTracking(reqProv.trackedTicket!.ticketCode);
+      }
+    });
   }
 
   @override
@@ -311,15 +319,30 @@ class _TicketTrackingScreenState extends State<TicketTrackingScreen>
     switch (ticket.status.toUpperCase()) {
       case 'ACCEPTED':
       case 'ALLOCATED':
+      case 'BED_ALLOCATED':
         statusColor = AppTheme.statusAvailable;
-        statusLabel = 'Bed Allocated / Accepted';
+        statusLabel = 'Bed Allocated';
         statusIcon = Icons.check_circle;
         break;
+      case 'ADMITTED':
+        statusColor = const Color(0xFF0D9488); // Teal Medical
+        statusLabel = 'Admitted to Bay';
+        statusIcon = Icons.local_hospital;
+        break;
+      case 'COMPLETED':
+      case 'DISCHARGED':
+        statusColor = const Color(0xFF16A34A);
+        statusLabel = 'Care Completed / Discharged';
+        statusIcon = Icons.task_alt;
+        break;
       case 'REJECTED':
+      case 'CANCELLED':
+      case 'DIVERTED':
         statusColor = AppTheme.error;
-        statusLabel = 'Triage Full / Rerouted';
+        statusLabel = 'Rerouted / Diverted';
         statusIcon = Icons.cancel;
         break;
+      case 'PENDING':
       default:
         statusColor = AppTheme.statusLimited;
         statusLabel = 'Under Review by Dispatcher';
@@ -337,6 +360,56 @@ class _TicketTrackingScreenState extends State<TicketTrackingScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Live Telemetry Sync Banner
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: AppTheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: AppTheme.outlineVariant.withValues(alpha: 0.5)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: const BoxDecoration(
+                        color: AppTheme.statusAvailable,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'Live Telemetry Active • Auto-updates',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+                InkWell(
+                  onTap: () => context.read<RequestProvider>().trackTicket(ticket.ticketCode),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.refresh, size: 14, color: AppTheme.primary),
+                      SizedBox(width: 4),
+                      Text(
+                        'Refresh',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppTheme.primary),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -385,10 +458,54 @@ class _TicketTrackingScreenState extends State<TicketTrackingScreen>
           _buildInfoRow('Severity Level', ticket.severity),
           _buildInfoRow('Hospital Target', ticket.hospitalName ?? 'Hospital #${ticket.requestedHospitalId}'),
           if (ticket.allocatedBedCategory != null)
-            _buildInfoRow('Allocated Bed', ticket.allocatedBedCategory!),
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppTheme.statusAvailableBg,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppTheme.statusAvailableBorder),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.bed, color: AppTheme.statusAvailableText, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Reserved Ward / Bed: ${ticket.allocatedBedCategory}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        color: AppTheme.statusAvailableText,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           _buildInfoRow('Reported ETA', '${ticket.etaMinutes} mins'),
           if (ticket.notes != null)
             _buildInfoRow('Notes', ticket.notes!),
+          const SizedBox(height: 14),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => MyBillsScreen(initialQuery: ticket.ticketCode),
+                ),
+              );
+            },
+            icon: const Icon(Icons.receipt_long, size: 16, color: AppTheme.primary),
+            label: const Text(
+              'View Hospital Invoices & Bills',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.primary),
+            ),
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size(double.infinity, 42),
+              side: const BorderSide(color: AppTheme.primary, width: 1),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
         ],
       ),
     );

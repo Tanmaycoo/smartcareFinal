@@ -141,7 +141,7 @@ def get_nearby_blood_banks(
         dist = None
         if lat is not None and lng is not None:
             dist = haversine(lat, lng, b.latitude, b.longitude)
-            if radius_km and dist > radius_km:
+            if radius_km is not None and radius_km > 0 and dist is not None and dist > radius_km:
                 continue
 
         # Recalculate total units from inventory

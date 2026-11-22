@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/patient_bill_model.dart';
+import '../../../data/services/storage_service.dart';
 import '../../../providers/auth_provider.dart';
 import '../../../providers/billing_provider.dart';
 import '../../widgets/clinical_header.dart';
@@ -10,7 +11,9 @@ import '../auth/login_screen.dart';
 import 'bill_detail_screen.dart';
 
 class MyBillsScreen extends StatefulWidget {
-  const MyBillsScreen({super.key});
+  final String? initialQuery;
+
+  const MyBillsScreen({super.key, this.initialQuery});
 
   @override
   State<MyBillsScreen> createState() => _MyBillsScreenState();
@@ -18,21 +21,35 @@ class MyBillsScreen extends StatefulWidget {
 
 class _MyBillsScreenState extends State<MyBillsScreen> {
   String _selectedStatus = 'All';
+  late final TextEditingController _searchCtrl;
 
   @override
   void initState() {
     super.initState();
+    _searchCtrl = TextEditingController(text: widget.initialQuery ?? '');
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final auth = context.read<AuthProvider>();
-      if (auth.isAuthenticated) {
-        _loadBills();
+      if (_searchCtrl.text.isEmpty) {
+        final storage = context.read<StorageService>();
+        final lastTicket = storage.getLastTicketCode();
+        if (lastTicket != null && lastTicket.isNotEmpty) {
+          // Keep as suggestion or pre-fill
+        }
       }
+      _loadBills();
     });
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
   }
 
   void _loadBills() {
     context.read<BillingProvider>().fetchBills(
           status: _selectedStatus != 'All' ? _selectedStatus : null,
+          query: _searchCtrl.text.trim().isNotEmpty ? _searchCtrl.text.trim() : null,
         );
   }
 
@@ -59,105 +76,153 @@ class _MyBillsScreenState extends State<MyBillsScreen> {
               onBack: () => Navigator.of(context).pop(),
             ),
 
-            if (!isAuthenticated)
-              Expanded(
-                child: Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.lock_outline, size: 54, color: AppTheme.primary),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Patient Authentication Required',
-                          style: TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            color: AppTheme.onSurface,
-                          ),
+            // Search Bar for Quick Invoice Lookup
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              color: AppTheme.surfaceContainerLowest,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: AppTheme.surfaceContainerLow,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppTheme.outlineVariant.withValues(alpha: 0.5)),
+                      ),
+                      child: TextField(
+                        controller: _searchCtrl,
+                        onSubmitted: (_) => _loadBills(),
+                        decoration: InputDecoration(
+                          hintText: 'Search by Phone, Ticket #, or Bill #',
+                          hintStyle: const TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant),
+                          prefixIcon: const Icon(Icons.search, size: 20, color: AppTheme.onSurfaceVariant),
+                          suffixIcon: _searchCtrl.text.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(Icons.clear, size: 16, color: AppTheme.onSurfaceVariant),
+                                  onPressed: () {
+                                    _searchCtrl.clear();
+                                    _loadBills();
+                                  },
+                                )
+                              : null,
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                          filled: false,
                         ),
-                        const SizedBox(height: 8),
-                        const Text(
-                          'Log in with your registered SmartCare patient account to securely view your invoices and receipts.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(fontSize: 13, color: AppTheme.onSurfaceVariant),
-                        ),
-                        const SizedBox(height: 24),
-                        ElevatedButton(
-                          onPressed: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute(builder: (_) => const LoginScreen()),
-                            );
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppTheme.primary,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          ),
-                          child: const Text('Log In to Patient Account', style: TextStyle(fontWeight: FontWeight.bold)),
-                        ),
-                      ],
+                        style: const TextStyle(fontSize: 13, color: AppTheme.onSurface),
+                      ),
                     ),
                   ),
-                ),
-              )
-            else ...[
-              // Filter Status Tabs
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: _loadBills,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      foregroundColor: Colors.white,
+                      minimumSize: const Size(60, 44),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: const Text('Find', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                  ),
+                ],
+              ),
+            ),
+
+            // Guest hint strip if not logged in
+            if (!isAuthenticated)
               Container(
-                height: 48,
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
+                color: AppTheme.primaryContainer.withValues(alpha: 0.25),
+                child: Row(
                   children: [
-                    _buildFilterChip('All', 'All Invoices'),
-                    const SizedBox(width: 8),
-                    _buildFilterChip('ISSUED', 'Unpaid'),
-                    const SizedBox(width: 8),
-                    _buildFilterChip('PARTIALLY_PAID', 'Partially Paid'),
-                    const SizedBox(width: 8),
-                    _buildFilterChip('PAID', 'Settled / Paid'),
-                    const SizedBox(width: 8),
-                    _buildFilterChip('OVERDUE', 'Overdue'),
+                    const Icon(Icons.info_outline, size: 15, color: AppTheme.primary),
+                    const SizedBox(width: 6),
+                    const Expanded(
+                      child: Text(
+                        'Viewing verified issued invoices. Sign in to link bills to your profile.',
+                        style: TextStyle(fontSize: 11, color: AppTheme.onSurfaceVariant),
+                      ),
+                    ),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        padding: EdgeInsets.zero,
+                        minimumSize: const Size(50, 24),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const LoginScreen()),
+                        );
+                      },
+                      child: const Text(
+                        'Sign In',
+                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: AppTheme.primary),
+                      ),
+                    ),
                   ],
                 ),
               ),
 
-              // Content Area
-              Expanded(
-                child: isLoading
-                    ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
-                    : billingProvider.error != null
-                        ? EmptyErrorView(
-                            title: 'Could Not Load Bills',
-                            description: billingProvider.error!,
-                            buttonText: 'Retry',
-                            onRetry: _loadBills,
-                          )
-                        : bills.isEmpty
-                            ? EmptyErrorView(
-                                title: 'No Bills Issued Yet',
-                                description:
-                                    'You have no active or historical medical bills registered for this account.',
-                                buttonText: 'Refresh',
-                                onRetry: _loadBills,
-                              )
-                            : RefreshIndicator(
-                                onRefresh: () async => _loadBills(),
-                                color: AppTheme.primary,
-                                child: ListView.separated(
-                                  padding: const EdgeInsets.all(16),
-                                  itemCount: bills.length,
-                                  separatorBuilder: (_, __) => const SizedBox(height: 12),
-                                  itemBuilder: (context, index) {
-                                    final bill = bills[index];
-                                    return _buildBillCard(context, bill);
-                                  },
-                                ),
-                              ),
+            // Filter Status Tabs
+            Container(
+              height: 48,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  _buildFilterChip('All', 'All Invoices'),
+                  const SizedBox(width: 8),
+                  _buildFilterChip('ISSUED', 'Unpaid'),
+                  const SizedBox(width: 8),
+                  _buildFilterChip('PARTIALLY_PAID', 'Partially Paid'),
+                  const SizedBox(width: 8),
+                  _buildFilterChip('PAID', 'Settled / Paid'),
+                  const SizedBox(width: 8),
+                  _buildFilterChip('OVERDUE', 'Overdue'),
+                ],
               ),
-            ],
+            ),
+
+            // Content Area
+            Expanded(
+              child: isLoading
+                  ? const Center(child: CircularProgressIndicator(color: AppTheme.primary))
+                  : billingProvider.error != null
+                      ? EmptyErrorView(
+                          title: 'Could Not Load Bills',
+                          description: billingProvider.error!,
+                          buttonText: 'Retry',
+                          onRetry: _loadBills,
+                        )
+                      : bills.isEmpty
+                          ? EmptyErrorView(
+                              title: 'No Invoices Found',
+                              description: _searchCtrl.text.isNotEmpty
+                                  ? 'No issued bills matched "${_searchCtrl.text}". Try entering your phone number or ticket code.'
+                                  : 'No medical bills are currently registered for this query.',
+                              buttonText: 'Show All Issued Bills',
+                              onRetry: () {
+                                _searchCtrl.clear();
+                                setState(() => _selectedStatus = 'All');
+                                _loadBills();
+                              },
+                            )
+                          : RefreshIndicator(
+                              onRefresh: () async => _loadBills(),
+                              color: AppTheme.primary,
+                              child: ListView.separated(
+                                padding: const EdgeInsets.all(16),
+                                itemCount: bills.length,
+                                separatorBuilder: (_, __) => const SizedBox(height: 12),
+                                itemBuilder: (context, index) {
+                                  final bill = bills[index];
+                                  return _buildBillCard(context, bill);
+                                },
+                              ),
+                            ),
+            ),
           ],
         ),
       ),
@@ -266,18 +331,40 @@ class _MyBillsScreenState extends State<MyBillsScreen> {
             ),
             const SizedBox(height: 8),
 
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    bill.patientName,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.onSurface,
+                    ),
+                  ),
+                ),
+                if (bill.patientPhone != null && bill.patientPhone!.isNotEmpty)
+                  Text(
+                    bill.patientPhone!,
+                    style: const TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 2),
+
             Text(
               bill.hospitalName ?? 'SmartCare Network Hospital',
               style: const TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w700,
-                color: AppTheme.onSurface,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: AppTheme.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 2),
             Text(
-              'Date: ${bill.billDate.day}/${bill.billDate.month}/${bill.billDate.year}',
-              style: const TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant),
+              'Issued: ${bill.billDate.day}/${bill.billDate.month}/${bill.billDate.year}',
+              style: const TextStyle(fontSize: 11, color: AppTheme.onSurfaceVariant),
             ),
 
             const Divider(height: 20, color: AppTheme.outlineVariant),

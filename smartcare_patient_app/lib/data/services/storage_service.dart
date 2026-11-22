@@ -8,6 +8,7 @@ class StorageService {
   static const String _keySavedHospitals = 'saved_hospital_ids';
   static const String _keyRecentSearches = 'recent_searches';
   static const String _keyApiHost = 'custom_api_host';
+  static const String _keyLastTicket = 'last_tracked_ticket';
 
   final SharedPreferences _prefs;
 
@@ -104,6 +105,16 @@ class StorageService {
 
   Future<void> setCustomApiHost(String host) async {
     await _prefs.setString(_keyApiHost, host);
+  }
+
+  // Last Tracked Ticket
+  String? getLastTicketCode() {
+    return _prefs.getString(_keyLastTicket);
+  }
+
+  Future<void> saveLastTicketCode(String code) async {
+    if (code.trim().isEmpty) return;
+    await _prefs.setString(_keyLastTicket, code.trim().toUpperCase());
   }
 
   // Full Logout

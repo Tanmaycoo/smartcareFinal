@@ -38,6 +38,6 @@ class AppConfig {
   static const double defaultLongitude = 73.8567;
   static const String defaultLocationName = 'Downtown Metro Area';
 
-  // API Request timeout
-  static const Duration connectTimeout = Duration(seconds: 12);
+  // API Request timeout (extended to 30s to allow for server wakeups)
+  static const Duration connectTimeout = Duration(seconds: 30);
 }

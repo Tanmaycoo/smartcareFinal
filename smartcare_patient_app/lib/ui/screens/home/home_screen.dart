@@ -22,11 +22,13 @@ import '../referrals/my_referrals_screen.dart';
 class HomeScreen extends StatefulWidget {
   final VoidCallback onNavigateToFind;
   final VoidCallback onProfileTap;
+  final VoidCallback? onNavigateToBlood;
 
   const HomeScreen({
     super.key,
     required this.onNavigateToFind,
     required this.onProfileTap,
+    this.onNavigateToBlood,
   });
 
   @override
@@ -360,6 +362,42 @@ class _HomeScreenState extends State<HomeScreen> {
                           children: [
                             _buildCategoryChip('All', 'All Hospitals', Icons.domain),
                             const SizedBox(width: 8),
+                            InkWell(
+                              onTap: () {
+                                if (widget.onNavigateToBlood != null) {
+                                  widget.onNavigateToBlood!();
+                                } else {
+                                  Navigator.of(context).push(
+                                    MaterialPageRoute(builder: (_) => const BloodDonationScreen()),
+                                  );
+                                }
+                              },
+                              borderRadius: BorderRadius.circular(9999),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFF1F2),
+                                  borderRadius: BorderRadius.circular(9999),
+                                  border: Border.all(color: const Color(0xFFFDA4AF), width: 1),
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.bloodtype, size: 15, color: Color(0xFFE11D48)),
+                                    SizedBox(width: 6),
+                                    Text(
+                                      'Blood Banks & Stock',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: Color(0xFFBE123C),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
                             _buildCategoryChip('Emergency 24/7', 'Emergency 24/7', Icons.emergency, iconColor: AppTheme.error),
                             const SizedBox(width: 8),
                             _buildCategoryChip('ICU Beds', 'ICU Beds', Icons.bed, iconColor: AppTheme.primary),
@@ -422,9 +460,14 @@ class _HomeScreenState extends State<HomeScreen> {
                         EmptyErrorView(
                           title: 'No Facilities Detected',
                           description:
-                              'Could not locate active hospital nodes in this range. Ensure backend is running.',
-                          buttonText: 'Retry Search',
-                          onRetry: () => hospitalProvider.fetchHospitals(),
+                              'Could not locate active hospital nodes in this range. Tap below to show all available network facilities.',
+                          buttonText: 'Show All Facilities',
+                          onRetry: () {
+                            hospitalProvider.setRadius(null);
+                            hospitalProvider.setCity('All');
+                            hospitalProvider.setCategoryFilter('All');
+                            hospitalProvider.setSearchQuery('');
+                          },
                         )
                       else
                         ...hospitals.take(3).map((h) => _buildHospitalHomeCard(context, h)),
@@ -677,9 +720,13 @@ class _HomeScreenState extends State<HomeScreen> {
                       // Blood Bank & Voluntary Donors Banner
                       InkWell(
                         onTap: () {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(builder: (_) => const BloodDonationScreen()),
-                          );
+                          if (widget.onNavigateToBlood != null) {
+                            widget.onNavigateToBlood!();
+                          } else {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(builder: (_) => const BloodDonationScreen()),
+                            );
+                          }
                         },
                         borderRadius: BorderRadius.circular(14),
                         child: Container(
