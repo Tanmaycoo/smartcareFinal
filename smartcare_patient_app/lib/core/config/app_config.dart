@@ -8,13 +8,16 @@ class AppConfig {
   // 10.211.56.163 is the developer machine Wi-Fi IP for physical mobile devices
   // 10.0.2.2 is the default alias to host loopback for Android emulator
   // 127.0.0.1 is for Windows Desktop and Web
-  static const String defaultWifiHost = 'http://10.211.56.163:8001/api';
-  static const String defaultEmulatorHost = 'http://10.0.2.2:8001/api';
-  static const String defaultLocalhost = 'http://127.0.0.1:8001/api';
+  static const String productionHost = 'https://smartcarefinal.onrender.com/api';
+  static const String defaultWifiHost = productionHost;
+  static const String defaultEmulatorHost = productionHost;
+  static const String defaultLocalhost = productionHost;
 
   static String _activeBaseUrl = defaultWifiHost;
 
   static String get baseUrl {
+    // Use production URL in release builds; otherwise use defaults for development.
+    if (kReleaseMode) return productionHost;
     if (kIsWeb) return defaultLocalhost;
     if (defaultTargetPlatform == TargetPlatform.windows) return defaultLocalhost;
     return _activeBaseUrl;
