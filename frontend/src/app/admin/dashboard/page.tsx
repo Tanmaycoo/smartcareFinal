@@ -417,11 +417,11 @@ export default function AdminDashboardPage() {
 
           <div className="flex items-center gap-4">
             <a
-              href="tel:911"
+              href="tel:112"
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-error-container text-on-error-container text-xs font-bold hover:brightness-95 transition-all shadow-sm"
             >
               <PhoneCall className="w-3.5 h-3.5 text-error animate-pulse" />
-              <span>Quick Hotline: 911</span>
+              <span>Quick Hotline: 112</span>
             </a>
 
             <button

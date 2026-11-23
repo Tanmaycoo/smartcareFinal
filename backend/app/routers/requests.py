@@ -193,3 +193,23 @@ def update_patient_request_status(
     if req.hospital:
         out.hospital_name = req.hospital.name
     return out
+
+
+@router.get("/hospital/requests/{request_id}", response_model=schemas.PatientRequestOut)
+def get_hospital_request(request_id: int,
+                         current_user: models.User = Depends(auth.require_hospital),
+                         db: Session = Depends(get_db)):
+    """Retrieve a single hospital request by ID.
+
+    Mirrors the PATCH endpoint but performs a read operation.
+    Access is limited to admins or users belonging to the requested hospital.
+    """
+    req = db.query(models.PatientRequest).filter(models.PatientRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if current_user.role != "ADMIN" and req.requested_hospital_id != current_user.hospital_id:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    out = schemas.PatientRequestOut.from_orm(req)
+    if req.hospital:
+        out.hospital_name = req.hospital.name
+    return out

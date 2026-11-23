@@ -30,7 +30,7 @@ class AppConfig {
   }
 
   // Emergency contact configurations
-  static const String emergencyHotline = '911';
+  static const String emergencyHotline = '112';
   static const String emergencyAmbulance = '108';
 
   // Default coordinate center (Downtown Metro Area / Regional Center)

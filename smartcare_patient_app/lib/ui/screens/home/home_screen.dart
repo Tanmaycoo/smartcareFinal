@@ -248,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   onPressed: _callEmergency,
                                   icon: const Icon(Icons.phone_in_talk, size: 18, color: AppTheme.error),
                                   label: const Text(
-                                    'Call 911',
+                                    'Call 112',
                                     style: TextStyle(
                                       fontSize: 13,
                                       fontWeight: FontWeight.bold,

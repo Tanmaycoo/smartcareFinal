@@ -816,7 +816,7 @@ export default function HospitalDashboardPage() {
 
           <div className="flex items-center gap-4">
             <a
-              href="tel:911"
+              href="tel:112"
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-error-container text-on-error-container text-xs font-bold hover:brightness-95 transition-all shadow-sm"
             >
               <PhoneCall className="w-3.5 h-3.5 text-error animate-pulse" />
@@ -955,7 +955,7 @@ export default function HospitalDashboardPage() {
                         <span>Broadcast Emergency Bed Alert</span>
                       </button>
                       <a
-                        href="tel:911"
+                        href="tel:112"
                         className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-surface-container-lowest hover:bg-surface-container-high text-secondary text-xs font-bold shadow-sm transition-colors"
                       >
                         <PhoneCall className="w-3.5 h-3.5 text-secondary" />
@@ -1689,28 +1689,28 @@ export default function HospitalDashboardPage() {
                     </p>
                     <div className="grid grid-cols-2 gap-2 pt-1">
                       <a
-                        href="tel:911"
+                        href="tel:112"
                         className="p-2 rounded bg-surface-container-lowest/15 hover:bg-surface-container-lowest/25 text-xs text-left flex items-center gap-1.5 transition-colors font-medium"
                       >
                         <PhoneCall className="w-3.5 h-3.5" />
                         ICU Charge Nurse
                       </a>
                       <a
-                        href="tel:911"
+                        href="tel:112"
                         className="p-2 rounded bg-surface-container-lowest/15 hover:bg-surface-container-lowest/25 text-xs text-left flex items-center gap-1.5 transition-colors font-medium"
                       >
                         <PhoneCall className="w-3.5 h-3.5" />
                         Blood Bank Core
                       </a>
                       <a
-                        href="tel:911"
+                        href="tel:112"
                         className="p-2 rounded bg-surface-container-lowest/15 hover:bg-surface-container-lowest/25 text-xs text-left flex items-center gap-1.5 transition-colors font-medium"
                       >
                         <PhoneCall className="w-3.5 h-3.5" />
                         Anesthesia On-Duty
                       </a>
                       <a
-                        href="tel:911"
+                        href="tel:112"
                         className="p-2 rounded bg-surface-container-lowest/15 hover:bg-surface-container-lowest/25 text-xs text-left flex items-center gap-1.5 transition-colors font-medium"
                       >
                         <PhoneCall className="w-3.5 h-3.5" />
